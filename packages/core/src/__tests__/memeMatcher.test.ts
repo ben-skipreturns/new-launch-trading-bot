@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildTrendTopics, TokenMemeMatcher } from "../index.js";
-import type { TokenLaunch, TrendObservation } from "../domain/types.js";
+import type { TokenLaunch, TrendObservation, TrendTopic } from "../domain/types.js";
 
 describe("TokenMemeMatcher", () => {
   const observedAt = new Date("2026-05-08T12:00:00.000Z");
@@ -42,6 +42,18 @@ describe("TokenMemeMatcher", () => {
     expect(match.memeRelevanceScore).toBeLessThan(0.7);
     expect(match.rejectFlags).toContain("MEME_RELEVANCE_TOO_LOW");
   });
+
+  it("ignores stale one-source OpenAI topics even when token text matches", async () => {
+    const match = await new TokenMemeMatcher().match({
+      launch: launch("RIVER", "River"),
+      topics: [openAiTopic({ canonicalPhrase: "river", aliases: ["river"], likelySymbols: ["RIVER"] })],
+      observedAt
+    });
+
+    expect(match.memeRelevanceScore).toBe(0);
+    expect(match.rejectFlags).toContain("NO_MATCHABLE_TOPICS");
+    expect(match.rejectFlags).toContain("MEME_RELEVANCE_TOO_LOW");
+  });
 });
 
 function observation(phrase: string, traffic: number): TrendObservation {
@@ -67,5 +79,32 @@ function launch(symbol: string, name: string): TokenLaunch {
     symbol,
     createdAt: new Date("2026-05-08T12:00:00.000Z"),
     raw: {}
+  };
+}
+
+function openAiTopic(overrides: Partial<{ canonicalPhrase: string; aliases: string[]; likelySymbols: string[] }> = {}): TrendTopic {
+  const canonicalPhrase = overrides.canonicalPhrase ?? "river";
+  return {
+    id: `trend:${canonicalPhrase}`,
+    canonicalPhrase,
+    aliases: overrides.aliases ?? [canonicalPhrase],
+    topicType: "other",
+    sourceCoverage: 1,
+    velocityScore: 0.6,
+    noveltyScore: 0.58,
+    firstSeen: new Date("2026-05-08T11:50:00.000Z"),
+    lastSeen: new Date("2026-05-08T11:55:00.000Z"),
+    evidenceUrls: ["https://x.com/example/status/1"],
+    raw: {
+      openAiMemeTopic: {
+        canonicalPhrase,
+        aliases: overrides.aliases ?? [canonicalPhrase],
+        likelySymbols: overrides.likelySymbols ?? [],
+        memeabilityScore: 0.65,
+        tokenizationLikelihood: 0.62,
+        saturationRisk: 0.35,
+        riskFlags: ["generic_name", "weak_token_name"]
+      }
+    }
   };
 }

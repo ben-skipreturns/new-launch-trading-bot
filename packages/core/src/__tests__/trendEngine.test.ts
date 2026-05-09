@@ -123,13 +123,13 @@ describe("MemeTrendEngine", () => {
           canonicalPhrase: "viral blind cat meme",
           aliases: ["blind cat", "ganymede"],
           likelySymbols: ["BLND", "CAT", "GANY"],
-          evidenceUrls: ["https://dexerto.com/ganymede-blind-cat"]
+          evidenceUrls: ["https://dexerto.com/ganymede-blind-cat", "https://people.com/ganymede-blind-cat"]
         }),
         openAiObservation("openai:blind-specific", "ganymede the blind cat", {
           canonicalPhrase: "ganymede the blind cat",
           aliases: ["ganymede", "blind cat"],
           likelySymbols: ["GANY", "CAT"],
-          evidenceUrls: ["https://dexerto.com/ganymede-blind-cat"]
+          evidenceUrls: ["https://dexerto.com/ganymede-blind-cat", "https://people.com/ganymede-blind-cat"]
         })
       ])
     ]);
@@ -142,7 +142,7 @@ describe("MemeTrendEngine", () => {
     expect(result.topics[0].aliases).toContain("ganymede");
   });
 
-  it("calibrates overconfident single-source saturated OpenAI topics", async () => {
+  it("filters overconfident single-source saturated OpenAI topics", async () => {
     const store = new MemoryStore();
     const engine = new MemeTrendEngine(store, [
       new StaticTrendSource("openai-meme-radar", [
@@ -162,23 +162,9 @@ describe("MemeTrendEngine", () => {
     ]);
 
     const result = await engine.refresh();
-    const topic = result.topics[0];
-    const raw = topic.raw as {
-      openAiMemeTopic?: {
-        memeabilityScore?: number;
-        tokenizationLikelihood?: number;
-        velocityScore?: number;
-        noveltyScore?: number;
-        saturationRisk?: number;
-      };
-    };
 
-    expect(topic.sourceCoverage).toBe(1);
-    expect(topic.velocityScore).toBeLessThan(1);
-    expect(topic.noveltyScore).toBeLessThan(1);
-    expect(raw.openAiMemeTopic?.memeabilityScore).toBeLessThan(1);
-    expect(raw.openAiMemeTopic?.tokenizationLikelihood).toBeLessThanOrEqual(0.66);
-    expect(raw.openAiMemeTopic?.saturationRisk).toBe(1);
+    expect(result.topics).toEqual([]);
+    expect(await store.listTrendTopics()).toEqual([]);
   });
 
   it("filters low-quality market spam headlines from trend candidates", () => {

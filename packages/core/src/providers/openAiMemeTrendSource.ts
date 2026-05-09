@@ -7,7 +7,7 @@ import type { Store } from "../storage/store.js";
 import { clamp, round } from "../utils/math.js";
 
 export const OPENAI_MEME_RADAR_SOURCE = "openai-meme-radar";
-export const OPENAI_MEME_RADAR_PROMPT_VERSION = "openai-meme-radar-v1";
+export const OPENAI_MEME_RADAR_PROMPT_VERSION = "openai-meme-radar-v2";
 
 export interface OpenAiMemeTrendSourceOptions {
   apiKey?: string;
@@ -50,24 +50,30 @@ const topicSchema = z.object({
   launchThesis: z.string().max(180)
 });
 
+const rejectedTopicSchema = topicSchema.extend({
+  rejectionReason: z.string().max(160)
+});
+
 const radarResponseSchema = z.object({
   generatedAt: z.string(),
-  topics: z.array(topicSchema)
+  activeTopics: z.array(topicSchema),
+  rejectedCandidates: z.array(rejectedTopicSchema).default([])
 });
 
 export type OpenAiRadarTopic = z.infer<typeof topicSchema>;
+export type OpenAiRejectedRadarTopic = z.infer<typeof rejectedTopicSchema>;
 type OpenAiRadarResponse = z.infer<typeof radarResponseSchema>;
 
 const responseJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["generatedAt", "topics"],
-  properties: {
-    generatedAt: { type: "string", description: "ISO timestamp for the trend scan." },
-    topics: {
-      type: "array",
-      maxItems: 20,
-      items: {
+    required: ["generatedAt", "activeTopics", "rejectedCandidates"],
+    properties: {
+      generatedAt: { type: "string", description: "ISO timestamp for the trend scan." },
+      activeTopics: {
+        type: "array",
+        maxItems: 20,
+        items: {
         type: "object",
         additionalProperties: false,
         required: [
@@ -106,8 +112,53 @@ const responseJsonSchema = {
           launchThesis: { type: "string", maxLength: 180 }
         }
       }
+      },
+      rejectedCandidates: {
+        type: "array",
+        maxItems: 15,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "canonicalPhrase",
+            "aliases",
+            "likelySymbols",
+            "topicType",
+            "memeabilityScore",
+            "tokenizationLikelihood",
+            "velocityScore",
+            "noveltyScore",
+            "saturationRisk",
+            "geography",
+            "evidenceUrls",
+            "reasonCodes",
+            "riskFlags",
+            "launchThesis",
+            "rejectionReason"
+          ],
+          properties: {
+            canonicalPhrase: { type: "string", maxLength: 80 },
+            aliases: { type: "array", maxItems: 6, items: { type: "string", maxLength: 48 } },
+            likelySymbols: { type: "array", maxItems: 5, items: { type: "string", maxLength: 16 } },
+            topicType: {
+              type: "string",
+              enum: ["person", "animal", "politics", "sports", "entertainment", "internet_phrase", "ai", "crypto", "other"]
+            },
+            memeabilityScore: { type: "number" },
+            tokenizationLikelihood: { type: "number" },
+            velocityScore: { type: "number" },
+            noveltyScore: { type: "number" },
+            saturationRisk: { type: "number" },
+            geography: { type: "string", maxLength: 40 },
+            evidenceUrls: { type: "array", maxItems: 3, items: { type: "string", maxLength: 240 } },
+            reasonCodes: { type: "array", maxItems: 6, items: { type: "string", maxLength: 40 } },
+            riskFlags: { type: "array", maxItems: 4, items: { type: "string", maxLength: 40 } },
+            launchThesis: { type: "string", maxLength: 180 },
+            rejectionReason: { type: "string", maxLength: 160 }
+          }
+        }
+      }
     }
-  }
 } as const;
 
 export class OpenAiMemeTrendSource implements TrendSource {
@@ -225,7 +276,12 @@ export class OpenAiMemeTrendSource implements TrendSource {
       const usage = usageFromResponse(raw);
       const webSearchCalls = countWebSearchCalls(raw);
       const estimatedCostUsd = estimateOpenAiTrendCost({ model: this.model, ...usage, webSearchCalls });
-      const observations = parsed.topics.slice(0, this.maxTopics).map((topic) =>
+      const reviewedTopics = parsed.activeTopics.map(reviewOpenAiTopicQuality);
+      const acceptedTopics = reviewedTopics.filter((review) => review.accepted).map((review) => review.topic).slice(0, this.maxTopics);
+      const applicationRejectedCandidates = reviewedTopics
+        .filter((review) => !review.accepted)
+        .map((review) => rejectedCandidateRecord(review.topic, review.reasons));
+      const observations = acceptedTopics.map((topic) =>
         topicToObservation(topic, {
           model: this.model,
           responseId: raw.id,
@@ -255,7 +311,13 @@ export class OpenAiMemeTrendSource implements TrendSource {
         raw: {
           response: raw as unknown as JsonValue,
           sourceUrls: extractSourceUrls(raw).slice(0, 50),
-          outputTopicCount: parsed.topics.length,
+          modelActiveTopicCount: parsed.activeTopics.length,
+          acceptedTopicCount: acceptedTopics.length,
+          modelRejectedCandidateCount: parsed.rejectedCandidates.length,
+          rejectedCandidates: parsed.rejectedCandidates.map((topic) =>
+            rejectedCandidateRecord(topic, ["model_rejected", normalizeReason(topic.rejectionReason)])
+          ),
+          applicationRejectedCandidates,
           maxTopics: this.maxTopics
         }
       });
@@ -379,31 +441,36 @@ export function topicToObservation(
     refreshWindowEndedAt: Date;
   }
 ): TrendObservation {
-  const canonicalPhrase = normalizePhrase(topic.canonicalPhrase);
+  const calibratedTopic = calibrateOpenAiRadarTopic(topic);
+  const canonicalPhrase = normalizePhrase(calibratedTopic.canonicalPhrase);
   const scoreWeight = clamp(
-    (clamp(topic.memeabilityScore) + clamp(topic.tokenizationLikelihood) + clamp(topic.velocityScore) + clamp(topic.noveltyScore)) /
+    (clamp(calibratedTopic.memeabilityScore) +
+      clamp(calibratedTopic.tokenizationLikelihood) +
+      clamp(calibratedTopic.velocityScore) +
+      clamp(calibratedTopic.noveltyScore)) /
       4 -
-      clamp(topic.saturationRisk) * 0.2
+      clamp(calibratedTopic.saturationRisk) * 0.2
   );
   return {
     id: `${OPENAI_MEME_RADAR_SOURCE}:${context.refreshWindowStartedAt.toISOString()}:${slugify(canonicalPhrase)}`,
     source: OPENAI_MEME_RADAR_SOURCE,
     phrase: canonicalPhrase,
     observedAt: context.observedAt,
-    url: topic.evidenceUrls[0],
-    title: topic.canonicalPhrase,
-    summary: topic.launchThesis,
+    url: calibratedTopic.evidenceUrls[0],
+    title: calibratedTopic.canonicalPhrase,
+    summary: calibratedTopic.launchThesis,
     weight: round(Math.max(0.1, scoreWeight)),
-    geo: topic.geography || undefined,
+    geo: calibratedTopic.geography || undefined,
     raw: {
       openAiMemeTopic: {
-        ...topic,
+        ...calibratedTopic,
         canonicalPhrase,
-        memeabilityScore: clamp(topic.memeabilityScore),
-        tokenizationLikelihood: clamp(topic.tokenizationLikelihood),
-        velocityScore: clamp(topic.velocityScore),
-        noveltyScore: clamp(topic.noveltyScore),
-        saturationRisk: clamp(topic.saturationRisk)
+        memeabilityScore: clamp(calibratedTopic.memeabilityScore),
+        tokenizationLikelihood: clamp(calibratedTopic.tokenizationLikelihood),
+        velocityScore: clamp(calibratedTopic.velocityScore),
+        noveltyScore: clamp(calibratedTopic.noveltyScore),
+        saturationRisk: clamp(calibratedTopic.saturationRisk),
+        sourceCoverage: distinctEvidenceDomains(calibratedTopic.evidenceUrls).length
       },
       model: context.model,
       responseId: context.responseId,
@@ -415,12 +482,108 @@ export function topicToObservation(
   };
 }
 
+interface TopicQualityReview {
+  accepted: boolean;
+  topic: OpenAiRadarTopic;
+  reasons: string[];
+}
+
+const BLOCKING_RISK_FLAGS = new Set([
+  "generic_name",
+  "promo_language",
+  "stale_evidence",
+  "stale_format",
+  "weak_token_name"
+]);
+
+const LOW_CONFIDENCE_TOPIC_TYPES = new Set<TrendTopicType>(["crypto", "other"]);
+
+export function reviewOpenAiTopicQuality(topic: OpenAiRadarTopic): TopicQualityReview {
+  const calibratedTopic = calibrateOpenAiRadarTopic(topic);
+  const evidenceDomainCount = distinctEvidenceDomains(calibratedTopic.evidenceUrls).length;
+  const riskFlags = calibratedTopic.riskFlags.map(normalizeReason);
+  const blockingFlags = riskFlags.filter((flag) => BLOCKING_RISK_FLAGS.has(flag));
+  const reasons: string[] = [];
+
+  if (evidenceDomainCount < 2) reasons.push("insufficient_independent_sources");
+  if (blockingFlags.length && !hasStrongCurrentEvidence(calibratedTopic, evidenceDomainCount)) {
+    reasons.push(...blockingFlags.map((flag) => `blocking_${flag}`));
+  }
+  if (calibratedTopic.memeabilityScore < 0.7) reasons.push("low_memeability");
+  if (calibratedTopic.tokenizationLikelihood < 0.6) reasons.push("low_tokenization_likelihood");
+  if (calibratedTopic.velocityScore < 0.55) reasons.push("low_velocity");
+  if (calibratedTopic.saturationRisk >= 0.85 && calibratedTopic.noveltyScore < 0.65) reasons.push("saturated_without_novelty");
+  if (isWeakStandaloneTopic(calibratedTopic) && !hasStrongCurrentEvidence(calibratedTopic, evidenceDomainCount)) {
+    reasons.push("weak_standalone_topic");
+  }
+
+  return {
+    accepted: reasons.length === 0,
+    topic: calibratedTopic,
+    reasons: [...new Set(reasons)]
+  };
+}
+
+export function calibrateOpenAiRadarTopic(topic: OpenAiRadarTopic): OpenAiRadarTopic {
+  const evidenceDomainCount = distinctEvidenceDomains(topic.evidenceUrls).length;
+  const riskFlags = topic.riskFlags.map(normalizeReason);
+  const hasBlockingRisk = riskFlags.some((flag) => BLOCKING_RISK_FLAGS.has(flag));
+  const hasStrongEvidence = hasStrongCurrentEvidence(topic, evidenceDomainCount);
+  const singleSourceCap = evidenceDomainCount < 2 ? 0.65 : 1;
+  const blockingCap = hasBlockingRisk && !hasStrongEvidence ? 0.64 : 1;
+  return {
+    ...topic,
+    canonicalPhrase: normalizePhrase(topic.canonicalPhrase),
+    memeabilityScore: round(Math.min(clamp(topic.memeabilityScore), singleSourceCap, blockingCap)),
+    tokenizationLikelihood: round(Math.min(clamp(topic.tokenizationLikelihood), blockingCap)),
+    velocityScore: round(Math.min(clamp(topic.velocityScore), blockingCap)),
+    noveltyScore: round(Math.min(clamp(topic.noveltyScore), blockingCap)),
+    saturationRisk: clamp(topic.saturationRisk),
+    riskFlags
+  };
+}
+
+function hasStrongCurrentEvidence(topic: OpenAiRadarTopic, evidenceDomainCount: number): boolean {
+  return (
+    evidenceDomainCount >= 3 &&
+    clamp(topic.memeabilityScore) >= 0.85 &&
+    clamp(topic.tokenizationLikelihood) >= 0.75 &&
+    clamp(topic.velocityScore) >= 0.8
+  );
+}
+
+function isWeakStandaloneTopic(topic: OpenAiRadarTopic): boolean {
+  const tokens = normalizePhrase(topic.canonicalPhrase).split(/\s+/).filter(Boolean);
+  if (tokens.length > 2) return false;
+  if (!LOW_CONFIDENCE_TOPIC_TYPES.has(topic.topicType)) return false;
+  return !topic.reasonCodes.map(normalizeReason).some((reason) => reason === "viral_animal" || reason === "public_figure_timing" || reason === "ai_agent_meta");
+}
+
+function rejectedCandidateRecord(topic: OpenAiRadarTopic | OpenAiRejectedRadarTopic, reasons: string[]): JsonObject {
+  const calibratedTopic = calibrateOpenAiRadarTopic(topic);
+  return {
+    canonicalPhrase: normalizePhrase(calibratedTopic.canonicalPhrase),
+    topicType: calibratedTopic.topicType,
+    memeabilityScore: calibratedTopic.memeabilityScore,
+    tokenizationLikelihood: calibratedTopic.tokenizationLikelihood,
+    velocityScore: calibratedTopic.velocityScore,
+    noveltyScore: calibratedTopic.noveltyScore,
+    saturationRisk: calibratedTopic.saturationRisk,
+    sourceCoverage: distinctEvidenceDomains(calibratedTopic.evidenceUrls).length,
+    evidenceUrls: calibratedTopic.evidenceUrls,
+    reasonCodes: calibratedTopic.reasonCodes.map(normalizeReason),
+    riskFlags: calibratedTopic.riskFlags.map(normalizeReason),
+    rejectionReasons: [...new Set(reasons.map(normalizeReason).filter(Boolean))]
+  };
+}
+
 function systemPrompt(): string {
   return [
     "You are a crypto cultural trend analyst for a Solana new-launch paper trader.",
     "Identify current events and internet topics that are likely to be tokenized by Solana memecoin launch markets in the next 1 to 6 hours.",
     "Do not return generic news unless it has memecoin shape: short tickerability, remixable visuals, public attention, absurdity, emotional charge, AI-agent novelty, political or celebrity timing, or launchpad-native resonance.",
-    "Use live web evidence. Prefer US and global English-language internet culture, but include global stories with clear meme transmission.",
+    "Use live web evidence. Active topics require at least two independent evidence domains; a single X thread or single-domain loop is not enough.",
+    "Prefer US and global English-language internet culture, but include global stories with clear meme transmission.",
     "Avoid financial advice. Return only the requested JSON schema."
   ].join(" ");
 }
@@ -428,13 +591,17 @@ function systemPrompt(): string {
 function userPrompt(now: Date, maxTopics: number): string {
   return [
     `Current timestamp: ${now.toISOString()}.`,
-    `Return up to ${maxTopics} topics. Rank by likelihood that a new Solana launch token will map to the topic soon.`,
-    "Keep the JSON compact: launchThesis <= 180 characters, evidenceUrls <= 3, aliases <= 6, likelySymbols <= 5, reasonCodes <= 6, riskFlags <= 4.",
+    `Return up to ${maxTopics} activeTopics, plus rejectedCandidates for plausible but weak ideas you considered. Rank activeTopics by likelihood that a new Solana launch token will map to the topic soon.`,
+    "Only put a topic in activeTopics when it has at least 2 independent evidence domains and a clear answer to: why would a Solana launcher create this token in the next 1 to 6 hours?",
+    "Put single-source ideas, single-X-thread ideas, generic phrases, weak token names, promo language, stale evidence, and saturated copycat frames in rejectedCandidates.",
+    "Keep the JSON compact: launchThesis <= 180 characters, evidenceUrls <= 3, aliases <= 6, likelySymbols <= 5, reasonCodes <= 6, riskFlags <= 4, rejectionReason <= 160.",
     "Calibrate scores. Do not set every score to 1.0. Only the top 1 to 3 genuinely exceptional topics may exceed 0.90. Old/background memes need fresh evidence from the last 24 to 72 hours to get high velocity or novelty.",
+    "If source coverage is below 2, cap memeabilityScore at 0.65 and put the item in rejectedCandidates.",
     "Use saturationRisk as a real penalty signal: saturated animal categories, stale formats, copycat swarms, and generic labels should have lower tokenizationLikelihood, velocityScore, and noveltyScore.",
     buildCaseStudyPromptSummary(),
-    "Reject or heavily penalize: stale clones, tragedy exploitation, generic market/news headlines, forced acronyms, saturated narratives, insider-heavy celebrity/political launches, and copycats without fresh public evidence.",
-    "Reason codes should be compact snake_case labels such as tickerable, remixable_visual, viral_animal, public_figure_timing, ai_agent_meta, social_phrase, launchpad_meta, community_takeover, exchange_reflexivity, saturated_clone, tragedy_risk, weak_token_name."
+    "Reject or heavily penalize: stale clones, tragedy exploitation, generic market/news headlines, forced acronyms, saturated narratives, insider-heavy celebrity/political launches, copycats without fresh public evidence, and terms that merely sound tokenizable.",
+    "Use riskFlags for stale_evidence, generic_name, weak_token_name, promo_language, saturated_clone, platform_dependent, tragedy_risk, political_risk, copycat_saturation, or fast_decay when applicable.",
+    "Reason codes should be compact snake_case labels such as tickerable, remixable_visual, viral_animal, public_figure_timing, ai_agent_meta, social_phrase, launchpad_meta, community_takeover, exchange_reflexivity, absurd_mascot."
   ].join("\n\n");
 }
 
@@ -453,7 +620,19 @@ function parseRadarResponse(payload: OpenAiResponsePayload): OpenAiRadarResponse
       `OpenAI response was not valid JSON (${message}). This is usually a truncated response; increase OPENAI_TREND_MAX_OUTPUT_TOKENS or lower OPENAI_TREND_MAX_TOPICS. Output length: ${text.length} characters.`
     );
   }
-  return radarResponseSchema.parse(json);
+  return radarResponseSchema.parse(normalizeRadarResponseShape(json));
+}
+
+function normalizeRadarResponseShape(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  if (!Array.isArray(value.activeTopics) && Array.isArray(value.topics)) {
+    return {
+      generatedAt: value.generatedAt,
+      activeTopics: value.topics,
+      rejectedCandidates: []
+    };
+  }
+  return value;
 }
 
 function extractOutputText(payload: OpenAiResponsePayload): string | undefined {
@@ -508,6 +687,29 @@ function numberOption(value: number | undefined, envValue: string | undefined, f
 function parseGeneratedAt(value: string, fallback: Date): Date {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function distinctEvidenceDomains(urls: string[]): string[] {
+  return [...new Set(urls.map(evidenceDomain).filter((domain): domain is string => Boolean(domain)))];
+}
+
+function evidenceDomain(url: string): string | undefined {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+    return hostname.split(".").slice(-2).join(".");
+  } catch {
+    return undefined;
+  }
+}
+
+export function normalizeReason(value: string | undefined): string {
+  return normalizePhrase(value ?? "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function refreshWindow(now: Date, refreshMinutes: number): { startedAt: Date; endedAt: Date } {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  calibrateOpenAiRadarTopic,
   estimateOpenAiTrendCost,
   MemoryStore,
   OpenAiMemeTrendSource,
+  topicToObservation,
   type TrendRefreshRun
 } from "../index.js";
 
@@ -51,6 +53,67 @@ describe("OpenAiMemeTrendSource", () => {
       response: { id: "resp_test" },
       sourceUrls: ["https://example.com/moodeng"]
     });
+  });
+
+  it("filters weak active topics into application rejections before storing observations", async () => {
+    const store = new MemoryStore();
+    const source = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => jsonResponse(openAiPayload({ includeWeakActiveTopic: true }))
+    });
+
+    const observations = await source.fetchObservations();
+    const runs = await store.listTrendRefreshRuns();
+    const raw = runs[0].raw as {
+      modelActiveTopicCount?: number;
+      acceptedTopicCount?: number;
+      applicationRejectedCandidates?: Array<{ canonicalPhrase?: string; rejectionReasons?: string[]; sourceCoverage?: number }>;
+    };
+
+    expect(observations).toHaveLength(1);
+    expect(raw.modelActiveTopicCount).toBe(2);
+    expect(raw.acceptedTopicCount).toBe(1);
+    expect(raw.applicationRejectedCandidates).toEqual([
+      expect.objectContaining({
+        canonicalPhrase: "river",
+        sourceCoverage: 1,
+        rejectionReasons: expect.arrayContaining([
+          "insufficient_independent_sources",
+          "blocking_generic_name",
+          "blocking_weak_token_name"
+        ])
+      })
+    ]);
+  });
+
+  it("caps single-source OpenAI memeability before observation storage", () => {
+    const topic = radarTopic({
+      canonicalPhrase: "Obsession Whale",
+      evidenceUrls: ["https://x.com/example/status/1"],
+      memeabilityScore: 0.96,
+      tokenizationLikelihood: 0.8,
+      velocityScore: 0.72,
+      noveltyScore: 0.7,
+      riskFlags: ["stale evidence"]
+    });
+
+    const calibrated = calibrateOpenAiRadarTopic(topic);
+    const observation = topicToObservation(topic, {
+      model: "gpt-5.4-mini",
+      promptVersion: "openai-meme-radar-v2",
+      runId: "run:test",
+      observedAt: new Date("2026-05-09T12:07:00.000Z"),
+      refreshWindowStartedAt: new Date("2026-05-09T12:00:00.000Z"),
+      refreshWindowEndedAt: new Date("2026-05-09T12:15:00.000Z")
+    });
+    const raw = observation.raw as { openAiMemeTopic?: { memeabilityScore?: number; riskFlags?: string[]; sourceCoverage?: number } };
+
+    expect(calibrated.memeabilityScore).toBeLessThanOrEqual(0.65);
+    expect(raw.openAiMemeTopic?.memeabilityScore).toBeLessThanOrEqual(0.65);
+    expect(raw.openAiMemeTopic?.sourceCoverage).toBe(1);
+    expect(raw.openAiMemeTopic?.riskFlags).toContain("stale_evidence");
   });
 
   it("does not call OpenAI twice for the same successful refresh window", async () => {
@@ -115,29 +178,50 @@ function jsonResponse(payload: unknown): Response {
   });
 }
 
-function openAiPayload() {
+function openAiPayload(options: { includeWeakActiveTopic?: boolean } = {}) {
+  const activeTopics = [
+    radarTopic({
+      canonicalPhrase: "Moo Deng baby hippo",
+      aliases: ["moo deng", "baby hippo"],
+      likelySymbols: ["MOODENG", "DENG"],
+      topicType: "animal",
+      memeabilityScore: 0.95,
+      tokenizationLikelihood: 0.91,
+      velocityScore: 0.86,
+      noveltyScore: 0.8,
+      saturationRisk: 0.22,
+      geography: "US/global",
+      evidenceUrls: ["https://example.com/moodeng", "https://news.example/moodeng"],
+      reasonCodes: ["viral_animal", "remixable_visual"],
+      riskFlags: ["copycat_swarm"],
+      launchThesis: "A globally legible animal story with short tickerability and visual remix potential."
+    })
+  ];
+  if (options.includeWeakActiveTopic) {
+    activeTopics.push(
+      radarTopic({
+        canonicalPhrase: "River",
+        aliases: ["flow"],
+        likelySymbols: ["RIVER"],
+        topicType: "other",
+        memeabilityScore: 0.74,
+        tokenizationLikelihood: 0.66,
+        velocityScore: 0.6,
+        noveltyScore: 0.58,
+        saturationRisk: 0.35,
+        evidenceUrls: ["https://x.com/example/status/2"],
+        reasonCodes: ["tickerable"],
+        riskFlags: ["generic name", "weak token name"],
+        launchThesis: "Simple nature word, but no clear meme loop."
+      })
+    );
+  }
   return {
     id: "resp_test",
     output_text: JSON.stringify({
       generatedAt: "2026-05-09T12:07:00.000Z",
-      topics: [
-        {
-          canonicalPhrase: "Moo Deng baby hippo",
-          aliases: ["moo deng", "baby hippo"],
-          likelySymbols: ["MOODENG", "DENG"],
-          topicType: "animal",
-          memeabilityScore: 0.95,
-          tokenizationLikelihood: 0.91,
-          velocityScore: 0.86,
-          noveltyScore: 0.8,
-          saturationRisk: 0.22,
-          geography: "US/global",
-          evidenceUrls: ["https://example.com/moodeng"],
-          reasonCodes: ["viral_animal", "remixable_visual"],
-          riskFlags: ["copycat_swarm"],
-          launchThesis: "A globally legible animal story with short tickerability and visual remix potential."
-        }
-      ]
+      activeTopics,
+      rejectedCandidates: [radarTopic({ canonicalPhrase: "Generic launchpad meta", rejectionReason: "Saturated category with no fresh hook." })]
     }),
     output: [{ type: "web_search_call", action: { sources: [{ url: "https://example.com/moodeng" }] } }],
     usage: {
@@ -148,12 +232,48 @@ function openAiPayload() {
   };
 }
 
+function radarTopic(overrides: Partial<{
+  canonicalPhrase: string;
+  aliases: string[];
+  likelySymbols: string[];
+  topicType: "person" | "animal" | "politics" | "sports" | "entertainment" | "internet_phrase" | "ai" | "crypto" | "other";
+  memeabilityScore: number;
+  tokenizationLikelihood: number;
+  velocityScore: number;
+  noveltyScore: number;
+  saturationRisk: number;
+  geography: string;
+  evidenceUrls: string[];
+  reasonCodes: string[];
+  riskFlags: string[];
+  launchThesis: string;
+  rejectionReason: string;
+}> = {}) {
+  return {
+    canonicalPhrase: overrides.canonicalPhrase ?? "Moo Deng baby hippo",
+    aliases: overrides.aliases ?? [],
+    likelySymbols: overrides.likelySymbols ?? ["MOODENG"],
+    topicType: overrides.topicType ?? "animal",
+    memeabilityScore: overrides.memeabilityScore ?? 0.9,
+    tokenizationLikelihood: overrides.tokenizationLikelihood ?? 0.85,
+    velocityScore: overrides.velocityScore ?? 0.78,
+    noveltyScore: overrides.noveltyScore ?? 0.72,
+    saturationRisk: overrides.saturationRisk ?? 0.3,
+    geography: overrides.geography ?? "US/global",
+    evidenceUrls: overrides.evidenceUrls ?? ["https://example.com/topic", "https://news.example/topic"],
+    reasonCodes: overrides.reasonCodes ?? ["viral_animal"],
+    riskFlags: overrides.riskFlags ?? [],
+    launchThesis: overrides.launchThesis ?? "A compact meme topic with launchpad-native shape.",
+    ...(overrides.rejectionReason ? { rejectionReason: overrides.rejectionReason } : {})
+  };
+}
+
 function refreshRun(overrides: Partial<TrendRefreshRun> = {}): TrendRefreshRun {
   return {
     id: "openai-meme-radar:gpt-5.4-mini:2026-05-09T12:00:00.000Z",
     source: "openai-meme-radar",
     model: "gpt-5.4-mini",
-    promptVersion: "openai-meme-radar-v1",
+    promptVersion: "openai-meme-radar-v2",
     refreshWindowStartedAt: new Date("2026-05-09T12:00:00.000Z"),
     refreshWindowEndedAt: new Date("2026-05-09T12:15:00.000Z"),
     startedAt: new Date("2026-05-09T12:00:05.000Z"),

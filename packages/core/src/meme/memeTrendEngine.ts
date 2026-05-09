@@ -89,6 +89,7 @@ export function buildTrendTopics(observations: TrendObservation[]): TrendTopic[]
         } as JsonValue
       } satisfies TrendTopic;
     })
+    .filter(isAcceptableTrendTopic)
     .sort((a, b) => b.velocityScore - a.velocityScore || b.sourceCoverage - a.sourceCoverage);
 }
 
@@ -362,6 +363,7 @@ const BACKGROUND_EVIDENCE_DOMAINS = new Set(["wikipedia.org", "knowyourmeme.com"
 
 const STALE_OR_SATURATED_RISK_FLAGS = new Set([
   "cat_saturation",
+  "copycat_saturation",
   "copycat_risk",
   "copycat_swarm",
   "fast_decay",
@@ -369,7 +371,17 @@ const STALE_OR_SATURATED_RISK_FLAGS = new Set([
   "phrase_exhaustion",
   "saturated_clone",
   "saturation",
-  "stale_clone"
+  "stale_clone",
+  "stale_evidence",
+  "stale_format"
+]);
+
+const BLOCKING_OPENAI_RISK_FLAGS = new Set([
+  "generic_name",
+  "promo_language",
+  "stale_evidence",
+  "stale_format",
+  "weak_token_name"
 ]);
 
 function buildTrendGroups(observations: TrendObservation[]): TrendObservation[][] {
@@ -547,15 +559,17 @@ function calibratedStructuredScore(
   const base = scoreFromStructuredTopics(topics, key);
   if (base === undefined) return undefined;
   const saturationRisk = scoreFromStructuredTopics(topics, "saturationRisk") ?? 0;
-  const riskFlags = new Set(topics.flatMap((topic) => topic.riskFlags ?? []));
+  const riskFlags = new Set(topics.flatMap((topic) => topic.riskFlags ?? []).map(normalizeRiskFlag));
   if (key === "saturationRisk") {
     const explicitRisk = [...riskFlags].some((flag) => STALE_OR_SATURATED_RISK_FLAGS.has(flag)) ? 0.72 : 0;
     return round(clamp(Math.max(base, explicitRisk)));
   }
 
   const evidenceDomains = distinctEvidenceDomains(evidenceUrls);
-  const evidenceCap = evidenceDomains.length >= 3 ? 0.98 : evidenceDomains.length >= 2 ? 0.92 : 0.82;
+  const evidenceCap =
+    evidenceDomains.length >= 3 ? 0.98 : evidenceDomains.length >= 2 ? 0.92 : key === "memeabilityScore" ? 0.65 : 0.82;
   const genericCap = isGenericTopicPhrase(phrase) ? 0.72 : 1;
+  const blockingRiskCap = [...riskFlags].some((flag) => BLOCKING_OPENAI_RISK_FLAGS.has(flag)) ? 0.64 : 1;
   const saturationCap =
     saturationRisk >= 0.75
       ? key === "tokenizationLikelihood"
@@ -575,7 +589,48 @@ function calibratedStructuredScore(
         : 0.78
       : 1;
 
-  return round(clamp(Math.min(base, evidenceCap, genericCap, saturationCap, backgroundCap, staleRiskCap)));
+  return round(clamp(Math.min(base, evidenceCap, genericCap, blockingRiskCap, saturationCap, backgroundCap, staleRiskCap)));
+}
+
+function isAcceptableTrendTopic(topic: TrendTopic): boolean {
+  const openAiTopic = openAiMemeTopicRawFromTopic(topic);
+  if (!openAiTopic) return true;
+  const riskFlags = new Set((openAiTopic.riskFlags ?? []).map(normalizeRiskFlag));
+  const hasBlockingRisk = [...riskFlags].some((flag) => BLOCKING_OPENAI_RISK_FLAGS.has(flag));
+  const strongEvidence =
+    topic.sourceCoverage >= 3 &&
+    (openAiTopic.memeabilityScore ?? 0) >= 0.85 &&
+    (openAiTopic.tokenizationLikelihood ?? 0) >= 0.75 &&
+    topic.velocityScore >= 0.8;
+
+  if (topic.sourceCoverage < 2) return false;
+  if (hasBlockingRisk && !strongEvidence) return false;
+  if ((openAiTopic.memeabilityScore ?? 0) < 0.7) return false;
+  if ((openAiTopic.tokenizationLikelihood ?? 0) < 0.6) return false;
+  if (topic.velocityScore < 0.55) return false;
+  if ((openAiTopic.saturationRisk ?? 0) >= 0.85 && topic.noveltyScore < 0.65) return false;
+  return true;
+}
+
+function openAiMemeTopicRawFromTopic(topic: TrendTopic): OpenAiMemeTopicRaw | undefined {
+  if (!isJsonObject(topic.raw)) return undefined;
+  const rawTopic = topic.raw.openAiMemeTopic;
+  if (!isJsonObject(rawTopic)) return undefined;
+  return {
+    canonicalPhrase: stringValue(rawTopic.canonicalPhrase),
+    aliases: stringArray(rawTopic.aliases),
+    likelySymbols: stringArray(rawTopic.likelySymbols),
+    topicType: topicTypeValue(rawTopic.topicType),
+    memeabilityScore: scoreValue(rawTopic.memeabilityScore),
+    tokenizationLikelihood: scoreValue(rawTopic.tokenizationLikelihood),
+    velocityScore: scoreValue(rawTopic.velocityScore),
+    noveltyScore: scoreValue(rawTopic.noveltyScore),
+    saturationRisk: scoreValue(rawTopic.saturationRisk),
+    evidenceUrls: stringArray(rawTopic.evidenceUrls),
+    reasonCodes: stringArray(rawTopic.reasonCodes),
+    riskFlags: stringArray(rawTopic.riskFlags),
+    launchThesis: stringValue(rawTopic.launchThesis)
+  };
 }
 
 function isGenericTopicPhrase(phrase: string): boolean {
@@ -607,6 +662,12 @@ function canonicalEvidenceUrl(url: string): string {
   } catch {
     return url;
   }
+}
+
+function normalizeRiskFlag(value: string): string {
+  return normalizePhrase(value)
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {

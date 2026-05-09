@@ -30,7 +30,10 @@ export class TokenMemeMatcher implements MemeMatcher {
     if (!normalizedCandidate) rejectFlags.push("NO_TOKEN_TEXT");
     if (isGenericOnly(normalizedCandidate)) rejectFlags.push("GENERIC_TOKEN_TEXT");
 
-    const scored = input.topics
+    const matchableTopics = input.topics.filter(isMatchableTrendTopic);
+    if (input.topics.length > 0 && matchableTopics.length === 0) rejectFlags.push("NO_MATCHABLE_TOPICS");
+
+    const scored = matchableTopics
       .map((topic) => scoreTopic(topic, normalizedCandidate, candidateSymbol))
       .sort((a, b) => b.score - a.score)[0];
 
@@ -153,6 +156,31 @@ function saturationRisk(topic: TrendTopic): number {
   return typeof value === "number" && Number.isFinite(value) ? clamp(value) : 0;
 }
 
+function isMatchableTrendTopic(topic: TrendTopic): boolean {
+  const openAiTopic = openAiMemeTopic(topic);
+  if (!isRecord(openAiTopic)) return true;
+  const riskFlags = stringArray(openAiTopic.riskFlags).map(normalizeReason);
+  const hasBlockingRisk = riskFlags.some((flag) =>
+    flag === "generic_name" || flag === "promo_language" || flag === "stale_evidence" || flag === "stale_format" || flag === "weak_token_name"
+  );
+  if (topic.sourceCoverage < 2) return false;
+  if (hasBlockingRisk && !hasStrongCurrentEvidence(topic, openAiTopic)) return false;
+  if (numberValue(openAiTopic.memeabilityScore) < 0.7) return false;
+  if (numberValue(openAiTopic.tokenizationLikelihood) < 0.6) return false;
+  if (topic.velocityScore < 0.55) return false;
+  if (saturationRisk(topic) >= 0.85 && topic.noveltyScore < 0.65) return false;
+  return true;
+}
+
+function hasStrongCurrentEvidence(topic: TrendTopic, openAiTopic: Record<string, unknown>): boolean {
+  return (
+    topic.sourceCoverage >= 3 &&
+    numberValue(openAiTopic.memeabilityScore) >= 0.85 &&
+    numberValue(openAiTopic.tokenizationLikelihood) >= 0.75 &&
+    topic.velocityScore >= 0.8
+  );
+}
+
 function hasOpenAiMemeTopic(topic: TrendTopic): boolean {
   return Boolean(openAiMemeTopic(topic));
 }
@@ -164,4 +192,18 @@ function openAiMemeTopic(topic: TrendTopic): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value) : 0;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function normalizeReason(value: string): string {
+  return normalizePhrase(value)
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }

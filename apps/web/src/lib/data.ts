@@ -207,6 +207,16 @@ async function getTopics(limit = 50): Promise<TopicListItem[]> {
        count(distinct m.mint)::int as matched_launches
      from trend_topics t
      left join token_meme_matches m on m.topic_id = t.id
+     where (
+       select max(refresh_window_started_at)
+       from trend_refresh_runs
+       where source = 'openai-meme-radar' and status = 'success'
+     ) is null
+       or t.last_seen >= (
+         select max(refresh_window_started_at)
+         from trend_refresh_runs
+         where source = 'openai-meme-radar' and status = 'success'
+       )
      group by t.id
      order by t.last_seen desc, t.velocity_score desc
      limit $1`,
