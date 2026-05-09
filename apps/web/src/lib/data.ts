@@ -4,7 +4,18 @@ import { Pool } from "pg";
 import type { ExitEvent, PaperOrder, ScoreSnapshot } from "@moonshot/core";
 import { calculateDashboardMetrics, calculatePositionDerivedValues } from "./aggregate";
 import { loadWorkspaceEnv } from "./env";
-import type { DashboardSummary, DataState, LaunchDetail, LaunchListItem, PositionListItem, TopicListItem, TrendRadarHealth } from "./types";
+import type {
+  DashboardSummary,
+  DataState,
+  LaunchDetail,
+  PositionListItem,
+  RadarReview,
+  RadarReviewCandidate,
+  RadarReviewRun,
+  TopicListItem,
+  TrendRadarHealth,
+  LaunchListItem
+} from "./types";
 
 loadWorkspaceEnv();
 
@@ -57,6 +68,10 @@ export async function getTopicList(): Promise<DataState<TopicListItem[]>> {
 
 export async function getTrendRadarStatus(): Promise<DataState<TrendRadarHealth>> {
   return safeRead(emptyTrendRadarHealth(), () => getTrendRadarHealth());
+}
+
+export async function getRadarReview(): Promise<DataState<RadarReview>> {
+  return safeRead(emptyRadarReview(), () => getRadarReviewData());
 }
 
 export async function getPositionList(): Promise<DataState<PositionListItem[]>> {
@@ -291,6 +306,27 @@ async function getTrendRadarHealth(): Promise<TrendRadarHealth> {
   };
 }
 
+async function getRadarReviewData(): Promise<RadarReview> {
+  if (!(await tableExists("trend_refresh_runs"))) return emptyRadarReview();
+
+  const [latest] = await query<TrendRefreshRunDetailRow>(`select * from trend_refresh_runs order by started_at desc limit 1`);
+  if (!latest) return emptyRadarReview();
+
+  const run = radarRunFromRow(latest);
+  const activeTopics = await getTopics(100);
+
+  const raw = isRecord(latest.raw) ? latest.raw : {};
+  const active = activeTopics.map((topic) => activeCandidateFromTopic(topic));
+  const watch = candidateArray(raw.applicationRejectedCandidates).map((candidate, index) =>
+    radarCandidateFromRaw(candidate, "watch", `watch:${index}`)
+  );
+  const rejected = candidateArray(raw.rejectedCandidates).map((candidate, index) =>
+    radarCandidateFromRaw(candidate, "rejected", `rejected:${index}`)
+  );
+
+  return { latestRun: run, active, watch, rejected };
+}
+
 async function tableExists(tableName: string): Promise<boolean> {
   const rows = await query<{ exists: boolean }>(`select to_regclass($1) is not null as exists`, [`public.${tableName}`]);
   return Boolean(rows[0]?.exists);
@@ -338,6 +374,14 @@ function emptyTrendRadarHealth(): TrendRadarHealth {
     latestEstimatedCostUsd: 0,
     estimatedCostTodayUsd: 0,
     estimatedCostMonthUsd: 0
+  };
+}
+
+function emptyRadarReview(): RadarReview {
+  return {
+    active: [],
+    watch: [],
+    rejected: []
   };
 }
 
@@ -393,6 +437,14 @@ interface TrendRefreshRunRow {
   topics_found: number;
   web_search_calls: number;
   estimated_cost_usd: string;
+}
+
+interface TrendRefreshRunDetailRow extends TrendRefreshRunRow {
+  completed_at: Date | null;
+  refresh_window_started_at: Date;
+  refresh_window_ended_at: Date;
+  error_text: string | null;
+  raw: unknown;
 }
 
 interface ExitEventRow {
@@ -512,6 +564,89 @@ function topicFromRow(row: TopicRow): TopicListItem {
     evidenceUrls: row.evidence_urls,
     matchedLaunches: row.matched_launches
   };
+}
+
+function radarRunFromRow(row: TrendRefreshRunDetailRow): RadarReviewRun {
+  const raw = isRecord(row.raw) ? row.raw : {};
+  return {
+    startedAt: row.started_at,
+    completedAt: row.completed_at ?? undefined,
+    refreshWindowStartedAt: row.refresh_window_started_at,
+    refreshWindowEndedAt: row.refresh_window_ended_at,
+    status: row.status,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    topicsFound: row.topics_found,
+    webSearchCalls: row.web_search_calls,
+    estimatedCostUsd: Number(row.estimated_cost_usd),
+    errorText: row.error_text ?? undefined,
+    modelActiveTopicCount: numberValue(raw.modelActiveTopicCount),
+    acceptedTopicCount: numberValue(raw.acceptedTopicCount),
+    modelRejectedCandidateCount: numberValue(raw.modelRejectedCandidateCount)
+  };
+}
+
+function activeCandidateFromTopic(topic: TopicListItem): RadarReviewCandidate {
+  return {
+    id: topic.id,
+    tier: "active",
+    canonicalPhrase: topic.canonicalPhrase,
+    topicType: topic.topicType,
+    memeabilityScore: topic.memeabilityScore,
+    tokenizationLikelihood: topic.tokenizationLikelihood,
+    velocityScore: topic.velocityScore,
+    noveltyScore: topic.noveltyScore,
+    saturationRisk: topic.saturationRisk,
+    sourceCoverage: topic.sourceCoverage,
+    likelySymbols: topic.likelySymbols,
+    reasonCodes: topic.reasonCodes,
+    riskFlags: topic.riskFlags,
+    rejectionReasons: [],
+    launchThesis: topic.launchThesis,
+    evidenceUrls: topic.evidenceUrls,
+    matchedLaunches: topic.matchedLaunches
+  };
+}
+
+function radarCandidateFromRaw(value: Record<string, unknown>, tier: RadarReviewCandidate["tier"], fallbackId: string): RadarReviewCandidate {
+  const canonicalPhrase = stringValue(value.canonicalPhrase) ?? "unknown candidate";
+  const topicType = stringValue(value.topicType);
+  return {
+    id: `${tier}:${canonicalPhrase}:${fallbackId}`,
+    tier,
+    canonicalPhrase,
+    topicType: isTopicType(topicType) ? topicType : undefined,
+    memeabilityScore: numberValue(value.memeabilityScore),
+    tokenizationLikelihood: numberValue(value.tokenizationLikelihood),
+    velocityScore: numberValue(value.velocityScore),
+    noveltyScore: numberValue(value.noveltyScore),
+    saturationRisk: numberValue(value.saturationRisk),
+    sourceCoverage: numberValue(value.sourceCoverage),
+    likelySymbols: stringArray(value.likelySymbols),
+    reasonCodes: stringArray(value.reasonCodes),
+    riskFlags: stringArray(value.riskFlags),
+    rejectionReasons: stringArray(value.rejectionReasons),
+    launchThesis: stringValue(value.launchThesis),
+    evidenceUrls: stringArray(value.evidenceUrls)
+  };
+}
+
+function candidateArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function isTopicType(value: unknown): value is RadarReviewCandidate["topicType"] {
+  return (
+    value === "person" ||
+    value === "animal" ||
+    value === "politics" ||
+    value === "sports" ||
+    value === "entertainment" ||
+    value === "internet_phrase" ||
+    value === "ai" ||
+    value === "crypto" ||
+    value === "other"
+  );
 }
 
 function scoreFromRow(row: ScoreRow): ScoreSnapshot {

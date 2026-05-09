@@ -25,6 +25,52 @@ export interface TrendRadarHealth {
   estimatedCostMonthUsd: number;
 }
 
+export type RadarReviewTier = "active" | "watch" | "rejected";
+
+export interface RadarReviewCandidate {
+  id: string;
+  tier: RadarReviewTier;
+  canonicalPhrase: string;
+  topicType?: TrendTopicType;
+  memeabilityScore?: number;
+  tokenizationLikelihood?: number;
+  velocityScore?: number;
+  noveltyScore?: number;
+  saturationRisk?: number;
+  sourceCoverage?: number;
+  likelySymbols: string[];
+  reasonCodes: string[];
+  riskFlags: string[];
+  rejectionReasons: string[];
+  launchThesis?: string;
+  evidenceUrls: string[];
+  matchedLaunches?: number;
+}
+
+export interface RadarReviewRun {
+  startedAt: Date;
+  completedAt?: Date;
+  refreshWindowStartedAt: Date;
+  refreshWindowEndedAt: Date;
+  status: string;
+  model: string;
+  promptVersion: string;
+  topicsFound: number;
+  webSearchCalls: number;
+  estimatedCostUsd: number;
+  errorText?: string;
+  modelActiveTopicCount?: number;
+  acceptedTopicCount?: number;
+  modelRejectedCandidateCount?: number;
+}
+
+export interface RadarReview {
+  latestRun?: RadarReviewRun;
+  active: RadarReviewCandidate[];
+  watch: RadarReviewCandidate[];
+  rejected: RadarReviewCandidate[];
+}
+
 export interface DashboardMetrics {
   activeTopics: number;
   recentCandidates: number;
