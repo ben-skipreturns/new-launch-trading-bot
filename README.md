@@ -31,7 +31,7 @@ The demo uses `fixtures/pumpapi-events.jsonl`, keeps data in memory, and writes 
 ```bash
 docker compose up -d db
 npm run migrate
-npm run replay:fixture -- --database-url postgres://moonshot:moonshot@localhost:5432/moonshot
+npm run replay:fixture -- --database-url postgres://moonshot:moonshot@127.0.0.1:5433/moonshot
 ```
 
 Set `DATABASE_URL` in `.env` to avoid repeating the connection string.

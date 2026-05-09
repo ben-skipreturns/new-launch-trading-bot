@@ -3,7 +3,10 @@ import "server-only";
 import { Pool } from "pg";
 import type { ExitEvent, PaperOrder, ScoreSnapshot } from "@moonshot/core";
 import { calculateDashboardMetrics, calculatePositionDerivedValues } from "./aggregate";
+import { loadWorkspaceEnv } from "./env";
 import type { DashboardSummary, DataState, LaunchDetail, LaunchListItem, PositionListItem, TopicListItem } from "./types";
+
+loadWorkspaceEnv();
 
 let pool: Pool | undefined;
 
