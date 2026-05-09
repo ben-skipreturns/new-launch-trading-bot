@@ -4,7 +4,8 @@ const navItems = [
   { href: "/", label: "Dashboard" },
   { href: "/launches", label: "Launches" },
   { href: "/topics", label: "Topics" },
-  { href: "/positions", label: "Positions" }
+  { href: "/positions", label: "Positions" },
+  { href: "/local", label: "Local Development" }
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -20,7 +21,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               Read-only paper-trading telemetry for meme-relevance launch filtering.
             </div>
           </div>
-          <nav className="flex flex-col gap-1 max-[980px]:flex-row max-[980px]:overflow-x-auto">
+          <nav className="flex flex-col gap-1 max-[980px]:flex-row max-[980px]:flex-wrap max-[980px]:overflow-visible">
             {navItems.map((item) => (
               <Link
                 className="rounded-md px-3 py-2 text-sm font-medium text-white/78 transition hover:bg-white/10 hover:text-white"

@@ -90,6 +90,7 @@ Pages:
 - `/launches/[mint]`: token detail with meme evidence, feature snapshot, score history, paper orders, and exits.
 - `/topics`: active trend topics with velocity, novelty, source coverage, evidence, and matched launch counts.
 - `/positions`: open and closed paper positions with moonbag exposure and estimated PnL.
+- `/local`: local development runbook for resetting Postgres, replaying fixtures, verifying data, and opening the web app.
 
 ## Cheap Meme-Relevance Use Case
 
