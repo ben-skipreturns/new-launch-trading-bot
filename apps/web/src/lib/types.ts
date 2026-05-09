@@ -13,6 +13,18 @@ export interface HealthSummary {
   latestTrendObservationAt?: Date;
 }
 
+export interface TrendRadarHealth {
+  latestRunAt?: Date;
+  latestStatus?: string;
+  model?: string;
+  promptVersion?: string;
+  topicsFound: number;
+  webSearchCalls: number;
+  latestEstimatedCostUsd: number;
+  estimatedCostTodayUsd: number;
+  estimatedCostMonthUsd: number;
+}
+
 export interface DashboardMetrics {
   activeTopics: number;
   recentCandidates: number;
@@ -67,6 +79,13 @@ export interface TopicListItem {
   sourceCoverage: number;
   velocityScore: number;
   noveltyScore: number;
+  memeabilityScore?: number;
+  tokenizationLikelihood?: number;
+  saturationRisk?: number;
+  likelySymbols: string[];
+  reasonCodes: string[];
+  riskFlags: string[];
+  launchThesis?: string;
   firstSeen: Date;
   lastSeen: Date;
   evidenceUrls: string[];
@@ -76,6 +95,7 @@ export interface TopicListItem {
 export interface DashboardSummary {
   generatedAt: Date;
   health: HealthSummary;
+  trendRadar: TrendRadarHealth;
   metrics: DashboardMetrics;
   recentCandidates: LaunchListItem[];
   openPositions: PositionListItem[];

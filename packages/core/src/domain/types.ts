@@ -220,6 +220,29 @@ export interface TrendTopic {
   raw: JsonValue;
 }
 
+export type TrendRefreshRunStatus = "success" | "error" | "skipped_budget" | "skipped_duplicate";
+
+export interface TrendRefreshRun {
+  id: string;
+  source: string;
+  model: string;
+  promptVersion: string;
+  refreshWindowStartedAt: Date;
+  refreshWindowEndedAt: Date;
+  startedAt: Date;
+  completedAt?: Date;
+  status: TrendRefreshRunStatus;
+  topicsFound: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  webSearchCalls: number;
+  estimatedCostUsd: number;
+  responseId?: string;
+  errorText?: string;
+  raw: JsonValue;
+}
+
 export interface TokenMemeMatch {
   mint: string;
   observedAt: Date;

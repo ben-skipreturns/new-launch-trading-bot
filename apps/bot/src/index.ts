@@ -1,24 +1,23 @@
 #!/usr/bin/env node
-import "dotenv/config";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { Command } from "commander";
+import { config } from "dotenv";
 import {
   BirdeyeEnricher,
   CompositeEnricher,
   DefaultFeatureExtractor,
   DefaultPaperBroker,
   DexScreenerEnricher,
-  GdeltDocTrendSource,
   GeckoTerminalEnricher,
-  GoogleTrendsRssSource,
   HeuristicScorer,
   JsonlLaunchFeed,
   MemeTrendEngine,
   MemoryStore,
+  OpenAiMemeTrendSource,
   PostgresStore,
   PumpApiLaunchFeed,
-  RssTrendSource,
   ReplayRunner,
   StaticFixtureEnricher,
   StaticTrendSource,
@@ -33,6 +32,8 @@ import {
   type TrendObservation,
   type TrendSource
 } from "@moonshot/core";
+
+loadWorkspaceEnv();
 
 const program = new Command();
 
@@ -65,7 +66,7 @@ program
   .action(async (options: { fixture: string; report: string; databaseUrl?: string }) => {
     const store = createStore(options.databaseUrl);
     try {
-      await refreshTrends(store, options.fixture.includes("fixture") ? fixtureTrendSources() : liveTrendSources());
+      await refreshTrends(store, options.fixture.includes("fixture") ? fixtureTrendSources() : liveTrendSources(store));
       const result = await runReplay(options.fixture, store, options.fixture.includes("fixture") ? fixtureEnricher() : liveEnricher());
       const report = await generateDailyReport(store);
       await writeText(options.report, report);
@@ -93,7 +94,7 @@ program
         return;
       }
 
-      await refreshTrends(store, liveTrendSources());
+      await refreshTrends(store, liveTrendSources(store));
       const feed = new PumpApiLaunchFeed();
       const pipeline = createPipeline(store, liveEnricher());
       const durationMs = Number(options.durationSeconds) * 1000;
@@ -106,14 +107,15 @@ program
 
 program
   .command("trend-refresh")
-  .description("Poll free trend sources and store active meme/current-event topics.")
+  .description("Run the OpenAI meme trend radar and store active meme/current-event topics.")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--fixture", "Use fixture trend observations instead of live web sources", false)
   .action(async (options: { databaseUrl?: string; fixture: boolean }) => {
     const store = createStore(options.databaseUrl);
     try {
-      const result = await refreshTrends(store, options.fixture ? fixtureTrendSources() : liveTrendSources());
+      const result = await refreshTrends(store, options.fixture ? fixtureTrendSources() : liveTrendSources(store));
       console.log(`Stored ${result.observations.length} trend observations and ${result.topics.length} topics.`);
+      if (!options.fixture) await printLatestTrendRefreshRun(store);
     } finally {
       await closeStore(store);
     }
@@ -267,20 +269,21 @@ async function refreshTrends(store: Store, sources: TrendSource[]) {
   return new MemeTrendEngine(store, sources).refresh();
 }
 
+async function printLatestTrendRefreshRun(store: Store): Promise<void> {
+  const [run] = await store.listTrendRefreshRuns();
+  if (!run) return;
+  console.log(
+    `Trend radar run: ${run.status} | model=${run.model} | topics=${run.topicsFound} | web_searches=${run.webSearchCalls} | estimated_cost=$${run.estimatedCostUsd.toFixed(4)}`
+  );
+  if (run.errorText) console.log(`Trend radar error: ${run.errorText}`);
+}
+
 function liveEnricher(): Enricher {
   return new CompositeEnricher([new DexScreenerEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()]);
 }
 
-function liveTrendSources(): TrendSource[] {
-  const rssUrls = (process.env.MEME_RSS_URLS ?? "")
-    .split(",")
-    .map((url) => url.trim())
-    .filter(Boolean);
-  return [
-    new GoogleTrendsRssSource(process.env.GOOGLE_TRENDS_RSS_URL),
-    new GdeltDocTrendSource(),
-    ...(rssUrls.length > 0 ? [new RssTrendSource("configured-rss", rssUrls)] : [])
-  ];
+function liveTrendSources(store: Store): TrendSource[] {
+  return [new OpenAiMemeTrendSource({ store })];
 }
 
 function fixtureTrendSources(): TrendSource[] {
@@ -348,4 +351,13 @@ function fixtureEnricher(): Enricher {
     }
   };
   return new StaticFixtureEnricher(values);
+}
+
+function loadWorkspaceEnv(): void {
+  const candidates = [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../.env"), resolve(process.cwd(), "../../.env")];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    config({ path, override: false });
+    return;
+  }
 }

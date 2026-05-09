@@ -12,6 +12,7 @@ import type {
   TokenMemeMatch,
   TokenLaunch,
   TradeEvent,
+  TrendRefreshRun,
   TrendObservation,
   TrendTopic
 } from "../domain/types.js";
@@ -29,6 +30,7 @@ export class MemoryStore implements Store {
   readonly exits = new Map<string, ExitEvent>();
   readonly trendTopics = new Map<string, TrendTopic>();
   readonly trendObservations: Array<TrendObservation & { topicId?: string }> = [];
+  readonly trendRefreshRuns: TrendRefreshRun[] = [];
   readonly memeMatches: TokenMemeMatch[] = [];
   readonly retentionRuns: RetentionRun[] = [];
 
@@ -86,6 +88,15 @@ export class MemoryStore implements Store {
     if (!this.trendObservations.some((item) => item.id === observation.id)) {
       this.trendObservations.push({ ...observation, topicId });
     }
+  }
+
+  async insertTrendRefreshRun(run: TrendRefreshRun): Promise<void> {
+    const existingIndex = this.trendRefreshRuns.findIndex((item) => item.id === run.id);
+    if (existingIndex >= 0) {
+      this.trendRefreshRuns[existingIndex] = run;
+      return;
+    }
+    this.trendRefreshRuns.push(run);
   }
 
   async upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void> {
@@ -155,6 +166,10 @@ export class MemoryStore implements Store {
 
   async listTrendObservations(from?: Date, to?: Date): Promise<TrendObservation[]> {
     return between(this.trendObservations, (observation) => observation.observedAt, from, to);
+  }
+
+  async listTrendRefreshRuns(from?: Date, to?: Date): Promise<TrendRefreshRun[]> {
+    return between(this.trendRefreshRuns, (run) => run.startedAt, from, to);
   }
 
   async getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined> {

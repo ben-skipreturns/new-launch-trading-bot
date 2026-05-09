@@ -9,7 +9,7 @@ This is experimental research software for extremely speculative assets. It does
 - PumpApi-compatible event normalization for `create`, `buy`, `sell`, `migration`, and `pool_created`.
 - Replayable JSONL launch feed plus live WebSocket feed scaffolding.
 - Provider enrichers for DEX Screener, GeckoTerminal, Jupiter price data, and Birdeye holder data.
-- Cheap meme-relevance filter using free trend sources and deterministic matching.
+- OpenAI meme trend radar with web search, budget tracking, an expanded historical case-study corpus, and deterministic token matching.
 - Next.js read-only command center for bot health, meme topics, launch decisions, positions, exits, and simulated PnL.
 - Time-consistent feature extraction at event, age, and bonding-curve milestones.
 - Heuristic scorer with graduation probability, risk score, trend score, expected value score, decision, and reason codes.
@@ -47,6 +47,7 @@ npm run start --workspace @moonshot/bot -- report --database-url "$DATABASE_URL"
 
 Optional provider keys:
 
+- `OPENAI_API_KEY` for live meme trend discovery.
 - `BIRDEYE_API_KEY`
 - `PUMPAPI_STREAM_URL`
 
@@ -92,21 +93,36 @@ Pages:
 - `/positions`: open and closed paper positions with moonbag exposure and estimated PnL.
 - `/local`: local development runbook for resetting Postgres, replaying fixtures, verifying data, and opening the web app.
 
-## Cheap Meme-Relevance Use Case
+## OpenAI Meme-Relevance Use Case
 
 The first focused use case is to paper-trade only launches that map to a current cultural trend. The bot now stores trend topics, matches token names/symbols/metadata against those topics, and requires `memeRelevanceScore >= 0.70` before a token can become a `paper_buy`.
 
-Trend sources are intentionally low-cost:
+Live trend discovery now uses one default source:
 
-- Google Trends RSS for US trending searches.
-- GDELT DOC API for news/event velocity.
-- Optional configured RSS/OpenRSS feeds through `MEME_RSS_URLS`.
-- Wikimedia pageviews support exists in core for tracked page titles.
+- `OpenAiMemeTrendSource` calls the OpenAI Responses API with web search and structured JSON output.
+- The default model is `gpt-5.4-mini`, refreshed every 15 minutes.
+- The default in-app OpenAI cap is now intentionally high: `$1,000/month` and `$100/day`; every refresh writes a `trend_refresh_runs` audit row with token usage, web-search calls, estimated cost, status, response id, and errors.
+- Configure an OpenAI project-level monthly budget as the primary external backstop; the in-app cap is only a last-resort guard so normal trend refreshes do not stop early.
+- The older Google Trends, GDELT, RSS, and Wikimedia trend providers have been removed for now so OpenAI is the only live trend path.
+- Historical Solana and control case studies live in `packages/core/src/meme/caseStudies.ts`; they guide the prompt and tests, not static buy rules.
 
 Run a trend refresh:
 
 ```bash
 npm run start --workspace @moonshot/bot -- trend-refresh --database-url "$DATABASE_URL"
+```
+
+Set `OPENAI_API_KEY` first. The code also supports:
+
+```bash
+OPENAI_TREND_MODEL=gpt-5.4-mini
+OPENAI_TREND_REFRESH_MINUTES=15
+OPENAI_TREND_MONTHLY_BUDGET_USD=1000
+OPENAI_TREND_DAILY_BUDGET_USD=100
+OPENAI_TREND_ESTIMATED_REFRESH_COST_USD=0.10
+OPENAI_TREND_MAX_TOPICS=20
+OPENAI_TREND_MAX_TOOL_CALLS=2
+OPENAI_TREND_MAX_OUTPUT_TOKENS=12000
 ```
 
 Generate a meme report:

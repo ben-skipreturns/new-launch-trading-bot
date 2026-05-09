@@ -13,6 +13,11 @@ export function formatScore(value: number | undefined): string {
   return value.toFixed(3);
 }
 
+export function formatUsd(value: number | undefined, digits = 2): string {
+  if (value === undefined || Number.isNaN(value)) return "-";
+  return `$${value.toFixed(digits)}`;
+}
+
 export function formatDate(value: Date | undefined): string {
   if (!value) return "-";
   return new Intl.DateTimeFormat("en-US", {

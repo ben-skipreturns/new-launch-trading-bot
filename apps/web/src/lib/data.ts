@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import type { ExitEvent, PaperOrder, ScoreSnapshot } from "@moonshot/core";
 import { calculateDashboardMetrics, calculatePositionDerivedValues } from "./aggregate";
 import { loadWorkspaceEnv } from "./env";
-import type { DashboardSummary, DataState, LaunchDetail, LaunchListItem, PositionListItem, TopicListItem } from "./types";
+import type { DashboardSummary, DataState, LaunchDetail, LaunchListItem, PositionListItem, TopicListItem, TrendRadarHealth } from "./types";
 
 loadWorkspaceEnv();
 
@@ -12,13 +12,14 @@ let pool: Pool | undefined;
 
 export async function getDashboardSummary(): Promise<DataState<DashboardSummary>> {
   return safeRead(emptyDashboard(), async () => {
-    const [launches, positions, topics, exits, orderCounts, health] = await Promise.all([
+    const [launches, positions, topics, exits, orderCounts, health, trendRadar] = await Promise.all([
       getLaunches(),
       getPositions(),
       getTopics(),
       getRecentExits(8),
       getOrderCounts(),
-      getHealth()
+      getHealth(),
+      getTrendRadarHealth()
     ]);
     const metrics = calculateDashboardMetrics({
       launches,
@@ -30,6 +31,7 @@ export async function getDashboardSummary(): Promise<DataState<DashboardSummary>
     return {
       generatedAt: new Date(),
       health,
+      trendRadar,
       metrics,
       recentCandidates: launches.slice(0, 10),
       openPositions: positions.filter((position) => position.status === "open").slice(0, 8),
@@ -51,6 +53,10 @@ export async function getLaunchList(sort: "latest" | "meme" | "risk" | "ev" = "l
 
 export async function getTopicList(): Promise<DataState<TopicListItem[]>> {
   return safeRead([], () => getTopics(100));
+}
+
+export async function getTrendRadarStatus(): Promise<DataState<TrendRadarHealth>> {
+  return safeRead(emptyTrendRadarHealth(), () => getTrendRadarHealth());
 }
 
 export async function getPositionList(): Promise<DataState<PositionListItem[]>> {
@@ -197,6 +203,7 @@ async function getTopics(limit = 50): Promise<TopicListItem[]> {
        t.first_seen,
        t.last_seen,
        t.evidence_urls,
+       t.raw,
        count(distinct m.mint)::int as matched_launches
      from trend_topics t
      left join token_meme_matches m on m.topic_id = t.id
@@ -243,6 +250,42 @@ async function getHealth(): Promise<DashboardSummary["health"]> {
   };
 }
 
+async function getTrendRadarHealth(): Promise<TrendRadarHealth> {
+  if (!(await tableExists("trend_refresh_runs"))) return emptyTrendRadarHealth();
+
+  const now = new Date();
+  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const [latestRows, totalRows] = await Promise.all([
+    query<TrendRefreshRunRow>(`select * from trend_refresh_runs order by started_at desc limit 1`),
+    query<{ today_cost_usd: string; month_cost_usd: string }>(
+      `select
+         coalesce(sum(estimated_cost_usd) filter (where status = 'success' and started_at >= $1), 0)::text as today_cost_usd,
+         coalesce(sum(estimated_cost_usd) filter (where status = 'success' and started_at >= $2), 0)::text as month_cost_usd
+       from trend_refresh_runs`,
+      [dayStart, monthStart]
+    )
+  ]);
+  const latest = latestRows[0];
+  const totals = totalRows[0];
+  return {
+    latestRunAt: latest?.started_at ?? undefined,
+    latestStatus: latest?.status,
+    model: latest?.model,
+    promptVersion: latest?.prompt_version,
+    topicsFound: latest?.topics_found ?? 0,
+    webSearchCalls: latest?.web_search_calls ?? 0,
+    latestEstimatedCostUsd: Number(latest?.estimated_cost_usd ?? 0),
+    estimatedCostTodayUsd: Number(totals?.today_cost_usd ?? 0),
+    estimatedCostMonthUsd: Number(totals?.month_cost_usd ?? 0)
+  };
+}
+
+async function tableExists(tableName: string): Promise<boolean> {
+  const rows = await query<{ exists: boolean }>(`select to_regclass($1) is not null as exists`, [`public.${tableName}`]);
+  return Boolean(rows[0]?.exists);
+}
+
 async function query<T>(text: string, params: unknown[] = []): Promise<T[]> {
   const client = getPool();
   const result = await client.query(text, params);
@@ -260,6 +303,7 @@ function emptyDashboard(): DashboardSummary {
   return {
     generatedAt: new Date(),
     health: { database: process.env.DATABASE_URL ? "error" : "not_configured" },
+    trendRadar: emptyTrendRadarHealth(),
     metrics: {
       activeTopics: 0,
       recentCandidates: 0,
@@ -274,6 +318,16 @@ function emptyDashboard(): DashboardSummary {
     openPositions: [],
     activeTopics: [],
     recentExits: []
+  };
+}
+
+function emptyTrendRadarHealth(): TrendRadarHealth {
+  return {
+    topicsFound: 0,
+    webSearchCalls: 0,
+    latestEstimatedCostUsd: 0,
+    estimatedCostTodayUsd: 0,
+    estimatedCostMonthUsd: 0
   };
 }
 
@@ -317,7 +371,18 @@ interface TopicRow {
   first_seen: Date;
   last_seen: Date;
   evidence_urls: string[];
+  raw: unknown;
   matched_launches: number;
+}
+
+interface TrendRefreshRunRow {
+  started_at: Date;
+  status: string;
+  model: string;
+  prompt_version: string;
+  topics_found: number;
+  web_search_calls: number;
+  estimated_cost_usd: string;
 }
 
 interface ExitEventRow {
@@ -417,6 +482,7 @@ function positionFromRow(row: PositionRow): PositionListItem {
 }
 
 function topicFromRow(row: TopicRow): TopicListItem {
+  const openAiTopic = openAiMemeTopicFromRaw(row.raw);
   return {
     id: row.id,
     canonicalPhrase: row.canonical_phrase,
@@ -424,6 +490,13 @@ function topicFromRow(row: TopicRow): TopicListItem {
     sourceCoverage: row.source_coverage,
     velocityScore: Number(row.velocity_score),
     noveltyScore: Number(row.novelty_score),
+    memeabilityScore: numberValue(openAiTopic?.memeabilityScore),
+    tokenizationLikelihood: numberValue(openAiTopic?.tokenizationLikelihood),
+    saturationRisk: numberValue(openAiTopic?.saturationRisk),
+    likelySymbols: stringArray(openAiTopic?.likelySymbols),
+    reasonCodes: stringArray(openAiTopic?.reasonCodes),
+    riskFlags: stringArray(openAiTopic?.riskFlags),
+    launchThesis: stringValue(openAiTopic?.launchThesis),
     firstSeen: row.first_seen,
     lastSeen: row.last_seen,
     evidenceUrls: row.evidence_urls,
@@ -511,4 +584,26 @@ function hydrateFeature(features: ScoreSnapshot["features"] | null): ScoreSnapsh
     };
   }
   return { ...features, asOf: new Date(features.asOf) };
+}
+
+function openAiMemeTopicFromRaw(raw: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(raw)) return undefined;
+  const topic = raw.openAiMemeTopic;
+  return isRecord(topic) ? topic : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -4,7 +4,8 @@ import { ErrorPanel } from "../components/error-panel";
 import { MetricCard } from "../components/metric-card";
 import { DecisionBadge, RiskBadge, StatusBadge } from "../components/status-badge";
 import { getDashboardSummary } from "../lib/data";
-import { formatAge, formatDate, formatPct, formatScore, formatSol, shortMint } from "../lib/format";
+import { formatAge, formatDate, formatPct, formatScore, formatSol, formatUsd, shortMint } from "../lib/format";
+import type { TrendRadarHealth } from "../lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,8 @@ export default async function DashboardPage() {
         <HealthItem label="Scores" value={data.health.latestScoreAt} />
         <HealthItem label="Trend observations" value={data.health.latestTrendObservationAt} />
       </section>
+
+      <TrendRadarPanel radar={data.trendRadar} />
 
       <section className="metric-grid">
         <MetricCard title="Active topics" value={String(data.metrics.activeTopics)} detail="Meme topics in trend cache" tone="accent" />
@@ -194,6 +197,30 @@ export default async function DashboardPage() {
   );
 }
 
+function TrendRadarPanel({ radar }: { radar: TrendRadarHealth }) {
+  return (
+    <section className="panel rounded-md p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Trend radar health</h2>
+          <div className="mt-1 text-sm text-muted">
+            {radar.model ?? "OpenAI model not run"} {radar.promptVersion ? `- ${radar.promptVersion}` : ""}
+          </div>
+        </div>
+        <StatusBadge label={radar.latestStatus ?? "missing"} tone={trendStatusTone(radar.latestStatus)} />
+      </div>
+      <div className="mt-4 grid grid-cols-6 gap-3 max-[1180px]:grid-cols-3 max-[780px]:grid-cols-2 max-[520px]:grid-cols-1">
+        <RadarStat label="Latest run" value={radar.latestRunAt ? formatAge(radar.latestRunAt) : "missing"} detail={formatDate(radar.latestRunAt)} />
+        <RadarStat label="Topics found" value={String(radar.topicsFound)} detail="latest refresh" />
+        <RadarStat label="Web searches" value={String(radar.webSearchCalls)} detail="latest refresh" />
+        <RadarStat label="Latest cost" value={formatUsd(radar.latestEstimatedCostUsd)} detail="estimated OpenAI spend" />
+        <RadarStat label="Today cost" value={formatUsd(radar.estimatedCostTodayUsd)} detail="estimated OpenAI spend" />
+        <RadarStat label="MTD cost" value={formatUsd(radar.estimatedCostMonthUsd)} detail="$100 monthly cap" />
+      </div>
+    </section>
+  );
+}
+
 function HealthItem({ label, value }: { label: string; value?: Date }) {
   return (
     <div className="panel flex items-center justify-between gap-4 rounded-md p-4">
@@ -204,6 +231,23 @@ function HealthItem({ label, value }: { label: string; value?: Date }) {
       <StatusBadge label={value ? formatAge(value) : "missing"} tone={value ? "open" : "neutral"} />
     </div>
   );
+}
+
+function RadarStat({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="rounded-md border border-line bg-white/70 px-3 py-2">
+      <div className="text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
+      <div className="mt-1 font-semibold">{value}</div>
+      <div className="mt-0.5 text-xs text-muted">{detail}</div>
+    </div>
+  );
+}
+
+function trendStatusTone(status?: string): Parameters<typeof StatusBadge>[0]["tone"] {
+  if (status === "success") return "open";
+  if (status === "error") return "reject";
+  if (status?.startsWith("skipped")) return "watch";
+  return "neutral";
 }
 
 function SectionHeader({ title, href }: { title: string; href: string }) {

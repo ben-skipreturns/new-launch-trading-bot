@@ -15,6 +15,7 @@ import type {
   TokenMemeMatch,
   TokenLaunch,
   TradeEvent,
+  TrendRefreshRun,
   TrendObservation,
   TrendTopic
 } from "../domain/types.js";
@@ -180,6 +181,27 @@ interface TrendObservationsTable {
   raw: JsonValue;
 }
 
+interface TrendRefreshRunsTable {
+  id: string;
+  source: string;
+  model: string;
+  prompt_version: string;
+  refresh_window_started_at: Date;
+  refresh_window_ended_at: Date;
+  started_at: Date;
+  completed_at: Date | null;
+  status: string;
+  topics_found: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  web_search_calls: number;
+  estimated_cost_usd: string;
+  response_id: string | null;
+  error_text: string | null;
+  raw: JsonValue;
+}
+
 interface TokenMemeMatchesTable {
   mint: string;
   observed_at: Date;
@@ -216,6 +238,7 @@ interface Database {
   exit_events: ExitEventsTable;
   trend_topics: TrendTopicsTable;
   trend_observations: TrendObservationsTable;
+  trend_refresh_runs: TrendRefreshRunsTable;
   token_meme_matches: TokenMemeMatchesTable;
   retention_runs: RetentionRunsTable;
 }
@@ -489,6 +512,47 @@ export class PostgresStore implements Store {
       .execute();
   }
 
+  async insertTrendRefreshRun(run: TrendRefreshRun): Promise<void> {
+    await this.db
+      .insertInto("trend_refresh_runs")
+      .values({
+        id: run.id,
+        source: run.source,
+        model: run.model,
+        prompt_version: run.promptVersion,
+        refresh_window_started_at: run.refreshWindowStartedAt,
+        refresh_window_ended_at: run.refreshWindowEndedAt,
+        started_at: run.startedAt,
+        completed_at: run.completedAt ?? null,
+        status: run.status,
+        topics_found: run.topicsFound,
+        input_tokens: run.inputTokens,
+        cached_input_tokens: run.cachedInputTokens,
+        output_tokens: run.outputTokens,
+        web_search_calls: run.webSearchCalls,
+        estimated_cost_usd: String(run.estimatedCostUsd),
+        response_id: run.responseId ?? null,
+        error_text: run.errorText ?? null,
+        raw: run.raw
+      })
+      .onConflict((oc) =>
+        oc.column("id").doUpdateSet({
+          completed_at: run.completedAt ?? null,
+          status: run.status,
+          topics_found: run.topicsFound,
+          input_tokens: run.inputTokens,
+          cached_input_tokens: run.cachedInputTokens,
+          output_tokens: run.outputTokens,
+          web_search_calls: run.webSearchCalls,
+          estimated_cost_usd: String(run.estimatedCostUsd),
+          response_id: run.responseId ?? null,
+          error_text: run.errorText ?? null,
+          raw: run.raw
+        })
+      )
+      .execute();
+  }
+
   async upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void> {
     await this.db
       .insertInto("token_meme_matches")
@@ -610,6 +674,13 @@ export class PostgresStore implements Store {
     if (from) query = query.where("observed_at", ">=", from);
     if (to) query = query.where("observed_at", "<=", to);
     return (await query.orderBy("observed_at").execute()).map(trendObservationFromRow);
+  }
+
+  async listTrendRefreshRuns(from?: Date, to?: Date): Promise<TrendRefreshRun[]> {
+    let query = this.db.selectFrom("trend_refresh_runs").selectAll();
+    if (from) query = query.where("started_at", ">=", from);
+    if (to) query = query.where("started_at", "<=", to);
+    return (await query.orderBy("started_at", "desc").execute()).map(trendRefreshRunFromRow);
   }
 
   async getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined> {
@@ -810,6 +881,29 @@ function trendObservationFromRow(row: Selectable<TrendObservationsTable>): Trend
     traffic: n(row.traffic),
     weight: Number(row.weight),
     geo: row.geo ?? undefined,
+    raw: row.raw
+  };
+}
+
+function trendRefreshRunFromRow(row: Selectable<TrendRefreshRunsTable>): TrendRefreshRun {
+  return {
+    id: row.id,
+    source: row.source,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    refreshWindowStartedAt: new Date(row.refresh_window_started_at),
+    refreshWindowEndedAt: new Date(row.refresh_window_ended_at),
+    startedAt: new Date(row.started_at),
+    completedAt: row.completed_at ? new Date(row.completed_at) : undefined,
+    status: row.status as TrendRefreshRun["status"],
+    topicsFound: row.topics_found,
+    inputTokens: row.input_tokens,
+    cachedInputTokens: row.cached_input_tokens,
+    outputTokens: row.output_tokens,
+    webSearchCalls: row.web_search_calls,
+    estimatedCostUsd: Number(row.estimated_cost_usd),
+    responseId: row.response_id ?? undefined,
+    errorText: row.error_text ?? undefined,
     raw: row.raw
   };
 }

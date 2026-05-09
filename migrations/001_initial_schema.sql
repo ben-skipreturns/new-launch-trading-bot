@@ -160,6 +160,27 @@ create table if not exists trend_observations (
   raw jsonb not null
 );
 
+create table if not exists trend_refresh_runs (
+  id text primary key,
+  source text not null,
+  model text not null,
+  prompt_version text not null,
+  refresh_window_started_at timestamptz not null,
+  refresh_window_ended_at timestamptz not null,
+  started_at timestamptz not null,
+  completed_at timestamptz,
+  status text not null,
+  topics_found integer not null default 0,
+  input_tokens integer not null default 0,
+  cached_input_tokens integer not null default 0,
+  output_tokens integer not null default 0,
+  web_search_calls integer not null default 0,
+  estimated_cost_usd numeric not null default 0,
+  response_id text,
+  error_text text,
+  raw jsonb not null default '{}'::jsonb
+);
+
 create table if not exists token_meme_matches (
   mint text not null references token_launches(mint) on delete cascade,
   observed_at timestamptz not null,
@@ -189,4 +210,6 @@ create index if not exists raw_events_mint_observed_at_idx on raw_events(mint, o
 create index if not exists trade_events_mint_occurred_at_idx on trade_events(mint, occurred_at);
 create index if not exists score_snapshots_mint_as_of_idx on score_snapshots(mint, as_of);
 create index if not exists trend_topics_last_seen_idx on trend_topics(last_seen desc);
+create index if not exists trend_refresh_runs_started_at_idx on trend_refresh_runs(started_at desc);
+create index if not exists trend_refresh_runs_window_idx on trend_refresh_runs(source, model, refresh_window_started_at);
 create index if not exists token_meme_matches_mint_observed_at_idx on token_meme_matches(mint, observed_at desc);

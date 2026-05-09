@@ -12,6 +12,7 @@ import type {
   TokenMemeMatch,
   TokenLaunch,
   TradeEvent,
+  TrendRefreshRun,
   TrendObservation,
   TrendTopic
 } from "../domain/types.js";
@@ -28,6 +29,7 @@ export interface Store {
   insertExitEvent(event: ExitEvent): Promise<void>;
   upsertTrendTopic(topic: TrendTopic): Promise<void>;
   insertTrendObservation(observation: TrendObservation, topicId?: string): Promise<void>;
+  insertTrendRefreshRun(run: TrendRefreshRun): Promise<void>;
   upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void>;
   insertRetentionRun(run: RetentionRun): Promise<void>;
 
@@ -43,6 +45,7 @@ export interface Store {
   listScoreSnapshots(from?: Date, to?: Date): Promise<ScoreSnapshot[]>;
   listTrendTopics(activeSince?: Date, limit?: number): Promise<TrendTopic[]>;
   listTrendObservations(from?: Date, to?: Date): Promise<TrendObservation[]>;
+  listTrendRefreshRuns(from?: Date, to?: Date): Promise<TrendRefreshRun[]>;
   getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined>;
   listTokenMemeMatches(from?: Date, to?: Date): Promise<TokenMemeMatch[]>;
   pruneRetention(options: RetentionPruneOptions): Promise<RetentionPruneResult>;
