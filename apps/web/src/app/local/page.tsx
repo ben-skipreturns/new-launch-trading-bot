@@ -1,18 +1,18 @@
 const quickLoop = [
   {
+    title: "Configure env",
+    body: "Keep one repo-root .env file. Use a dedicated OpenAI project key and set OpenAI-side budget controls before live trend refreshes.",
+    command: "test -f .env || cp .env.example .env"
+  },
+  {
     title: "Start Postgres",
     body: "Runs the project database in Docker on host port 5433, leaving any machine-level Postgres on 5432 alone.",
     command: "docker compose up -d db"
   },
   {
     title: "Apply schema",
-    body: "Creates or updates the command-center tables used by replay, scoring, paper positions, topics, and reports.",
+    body: "Creates or updates the command-center tables, including trend radar audit and cost tracking tables.",
     command: "npm run migrate"
-  },
-  {
-    title: "Replay fixture",
-    body: "Loads deterministic launch, trend, score, and paper-trade data into Postgres for inspection.",
-    command: "npm run replay:fixture"
   },
   {
     title: "Open command center",
@@ -20,6 +20,29 @@ const quickLoop = [
     command: "npm run web:dev"
   }
 ];
+
+const envLines = [
+  "DATABASE_URL=postgres://moonshot:moonshot@127.0.0.1:5433/moonshot",
+  "OPENAI_API_KEY=sk-...",
+  "OPENAI_TREND_MODEL=gpt-5.4-mini",
+  "OPENAI_TREND_REFRESH_MINUTES=15",
+  "OPENAI_TREND_MONTHLY_BUDGET_USD=1000",
+  "OPENAI_TREND_DAILY_BUDGET_USD=100",
+  "OPENAI_TREND_ESTIMATED_REFRESH_COST_USD=0.10",
+  "OPENAI_TREND_MAX_TOPICS=20",
+  "OPENAI_TREND_MAX_TOOL_CALLS=2",
+  "OPENAI_TREND_MAX_OUTPUT_TOKENS=12000",
+  "NEXT_PUBLIC_REFRESH_SECONDS=30"
+];
+
+const liveTrendLoop = [
+  "docker compose up -d db",
+  "npm run migrate",
+  "npm run start --workspace @moonshot/bot -- trend-refresh",
+  "npm run web:dev"
+];
+
+const fixtureLoop = ["docker compose up -d db", "npm run migrate", "npm run replay:fixture", "npm run web:dev"];
 
 const resetLoop = [
   "docker compose down -v",
@@ -42,6 +65,16 @@ const inspectCommands = [
     label: "Fixture row counts",
     command:
       "node -e \"const {Client}=require('pg');(async()=>{const c=new Client({connectionString:'postgres://moonshot:moonshot@127.0.0.1:5433/moonshot'});await c.connect();const r=await c.query('select (select count(*) from token_launches) launches, (select count(*) from score_snapshots) scores, (select count(*) from trend_topics) topics, (select count(*) from paper_positions) positions');console.log(r.rows[0]);await c.end();})().catch(e=>{console.error(e.message);process.exit(1);})\""
+  },
+  {
+    label: "Latest trend radar runs",
+    command:
+      "docker compose exec db psql -U moonshot -d moonshot -c \"select started_at, status, model, topics_found, web_search_calls, estimated_cost_usd, left(coalesce(error_text, ''), 120) as error from trend_refresh_runs order by started_at desc limit 5;\""
+  },
+  {
+    label: "Active topic sample",
+    command:
+      'docker compose exec db psql -U moonshot -d moonshot -c "select canonical_phrase, topic_type, velocity_score, novelty_score, source_coverage, last_seen from trend_topics order by last_seen desc limit 10;"'
   }
 ];
 
@@ -57,6 +90,14 @@ const troubleshooting = [
   {
     issue: "Dashboard connects but shows no launches",
     fix: "Run npm run replay:fixture. npm run demo only uses memory and writes reports/demo.md."
+  },
+  {
+    issue: "trend-refresh stores 0 topics",
+    fix: "Check the latest trend_refresh_runs row. If status is error, read error_text. If status is skipped_duplicate, that 15-minute window already has a successful run."
+  },
+  {
+    issue: "OpenAI response is incomplete because of max_output_tokens",
+    fix: "Keep the live-like topic count and raise OPENAI_TREND_MAX_OUTPUT_TOKENS. The current default is 12000."
   },
   {
     issue: "Docker database has old test data",
@@ -91,6 +132,24 @@ export default function LocalLoopPage() {
         </div>
       </section>
 
+      <section className="grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] gap-4 max-[1120px]:grid-cols-1">
+        <div className="panel rounded-md p-5">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Root .env</h2>
+          <p className="mt-3 text-sm leading-6 text-muted">
+            These values mirror the intended live trend radar shape. OpenAI project budgets should be the primary cost control; the app-level values are broad backstops.
+          </p>
+          <PreBlock lines={envLines} />
+        </div>
+
+        <div className="panel rounded-md p-5">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Trend radar loop</h2>
+          <p className="mt-3 text-sm leading-6 text-muted">
+            Use this when tuning meme trend quality. It runs the OpenAI-only radar, writes topics and audit rows, then opens the command center for inspection.
+          </p>
+          <PreBlock lines={liveTrendLoop} />
+        </div>
+      </section>
+
       <section className="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4 max-[1120px]:grid-cols-1">
         <div className="panel rounded-md p-5">
           <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Clean reset</h2>
@@ -104,15 +163,23 @@ export default function LocalLoopPage() {
         </div>
 
         <div className="panel rounded-md p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Inspect data</h2>
-          <div className="mt-4 space-y-4">
-            {inspectCommands.map((item) => (
-              <div key={item.label}>
-                <div className="text-sm font-semibold text-ink">{item.label}</div>
-                <CommandBlock command={item.command} />
-              </div>
-            ))}
-          </div>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Fixture loop</h2>
+          <p className="mt-3 text-sm leading-6 text-muted">
+            Use this when tuning deterministic scoring, matching, broker behavior, and reports without spending OpenAI tokens.
+          </p>
+          <PreBlock lines={fixtureLoop} />
+        </div>
+      </section>
+
+      <section className="panel rounded-md p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Inspect data</h2>
+        <div className="mt-4 grid grid-cols-2 gap-4 max-[1120px]:grid-cols-1">
+          {inspectCommands.map((item) => (
+            <div key={item.label}>
+              <div className="text-sm font-semibold text-ink">{item.label}</div>
+              <CommandBlock command={item.command} />
+            </div>
+          ))}
         </div>
       </section>
 
@@ -133,6 +200,7 @@ export default function LocalLoopPage() {
               <tbody>
                 <CommandRow command="npm run demo" writes="No" purpose="Runs the pipeline in memory and writes reports/demo.md." />
                 <CommandRow command="npm run replay:fixture" writes="Yes" purpose="Replays fixtures into Postgres and writes reports/replay.md." />
+                <CommandRow command="npm run start --workspace @moonshot/bot -- trend-refresh" writes="Yes" purpose="Runs the OpenAI meme radar and writes topics, observations, and refresh audit rows." />
                 <CommandRow command="npm run migrate" writes="Yes" purpose="Applies SQL schema migrations to the configured database." />
                 <CommandRow command="npm run web:dev" writes="No" purpose="Starts the read-only Next.js command center." />
                 <CommandRow command="npm run check" writes="No" purpose="Runs TypeScript checks across workspaces." />

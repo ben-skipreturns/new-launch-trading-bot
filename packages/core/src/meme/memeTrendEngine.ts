@@ -27,16 +27,10 @@ export class MemeTrendEngine {
 }
 
 export function buildTrendTopics(observations: TrendObservation[]): TrendTopic[] {
-  const groups = new Map<string, TrendObservation[]>();
-  for (const observation of observations) {
-    const phrase = normalizePhrase(observation.phrase);
-    if (!phrase) continue;
-    groups.set(phrase, [...(groups.get(phrase) ?? []), observation]);
-  }
-
-  return [...groups.entries()]
-    .map(([phrase, items]) => {
+  return buildTrendGroups(observations)
+    .map((items) => {
       const structuredTopics = items.map(openAiMemeTopicFromObservation).filter((topic): topic is OpenAiMemeTopicRaw => Boolean(topic));
+      const phrase = chooseCanonicalPhrase(items, structuredTopics);
       const structuredAliases = structuredTopics.flatMap((topic) => [
         topic.canonicalPhrase,
         ...(topic.aliases ?? []),
@@ -58,20 +52,24 @@ export function buildTrendTopics(observations: TrendObservation[]): TrendTopic[]
           ...structuredTopics.flatMap((topic) => topic.evidenceUrls ?? [])
         ])
       ].slice(0, 10);
+      const evidenceDomainCount = distinctEvidenceDomains(evidenceUrls).length;
+      const sourceCoverage = Math.max(sources.size, evidenceDomainCount);
       const totalWeight = items.reduce((sum, item) => sum + item.weight + Math.log10((item.traffic ?? 0) + 1) / 6, 0);
       const heuristicVelocityScore = round(clamp(totalWeight / 6 + sources.size * 0.08));
-      const velocityScore = scoreFromStructuredTopics(structuredTopics, "velocityScore") ?? heuristicVelocityScore;
+      const velocityScore =
+        calibratedStructuredScore(structuredTopics, "velocityScore", phrase, evidenceUrls) ?? heuristicVelocityScore;
       const referenceTime = Math.max(...items.map((item) => item.observedAt.getTime()));
       const ageHours = Math.max(1, (referenceTime - firstSeen.getTime()) / (60 * 60 * 1000));
       const heuristicNoveltyScore = round(clamp(1 / Math.sqrt(ageHours / 12)));
-      const noveltyScore = scoreFromStructuredTopics(structuredTopics, "noveltyScore") ?? heuristicNoveltyScore;
+      const noveltyScore =
+        calibratedStructuredScore(structuredTopics, "noveltyScore", phrase, evidenceUrls) ?? heuristicNoveltyScore;
       const structuredTopicRaw = buildStructuredTopicRaw(phrase, structuredTopics, evidenceUrls);
       return {
         id: `trend:${slugify(phrase)}`,
         canonicalPhrase: phrase,
         aliases,
         topicType: mostCommonTopicType(structuredTopics.map((topic) => topic.topicType).filter(isTrendTopicType)) ?? classifyTopic(phrase),
-        sourceCoverage: sources.size,
+        sourceCoverage,
         velocityScore,
         noveltyScore,
         geo: mostCommon(items.map((item) => item.geo).filter((geo): geo is string => Boolean(geo))),
@@ -329,6 +327,165 @@ interface OpenAiMemeTopicRaw {
   launchThesis?: string;
 }
 
+interface TrendGroupSignal {
+  observation: TrendObservation;
+  phrase: string;
+  aliases: Set<string>;
+  urls: Set<string>;
+  tokens: Set<string>;
+}
+
+interface TrendGroup {
+  items: TrendObservation[];
+  aliases: Set<string>;
+  urls: Set<string>;
+  tokens: Set<string>;
+  phrases: Set<string>;
+}
+
+const GENERIC_TOPIC_TOKENS = new Set([
+  "general",
+  "meme",
+  "memes",
+  "trend",
+  "viral",
+  "reaction",
+  "rumor",
+  "rumour",
+  "fest",
+  "format",
+  "coin",
+  "token"
+]);
+
+const BACKGROUND_EVIDENCE_DOMAINS = new Set(["wikipedia.org", "knowyourmeme.com", "meme.com"]);
+
+const STALE_OR_SATURATED_RISK_FLAGS = new Set([
+  "cat_saturation",
+  "copycat_risk",
+  "copycat_swarm",
+  "fast_decay",
+  "fad_decay",
+  "phrase_exhaustion",
+  "saturated_clone",
+  "saturation",
+  "stale_clone"
+]);
+
+function buildTrendGroups(observations: TrendObservation[]): TrendObservation[][] {
+  const groups: TrendGroup[] = [];
+  for (const observation of observations) {
+    const signal = observationSignal(observation);
+    if (!signal) continue;
+    const matching = groups.filter((group) => groupMatchesSignal(group, signal));
+    if (!matching.length) {
+      groups.push(groupFromSignal(signal));
+      continue;
+    }
+
+    const [target, ...rest] = matching;
+    addSignalToGroup(target, signal);
+    for (const group of rest) {
+      mergeGroups(target, group);
+      groups.splice(groups.indexOf(group), 1);
+    }
+  }
+  return groups.map((group) => group.items);
+}
+
+function observationSignal(observation: TrendObservation): TrendGroupSignal | undefined {
+  const phrase = normalizePhrase(observation.phrase);
+  if (!phrase) return undefined;
+  const topic = openAiMemeTopicFromObservation(observation);
+  const aliases = new Set<string>([phrase]);
+  if (topic) {
+    for (const alias of [topic.canonicalPhrase, ...(topic.aliases ?? [])]) {
+      const normalized = normalizePhrase(alias ?? "");
+      if (isUsefulGroupingAlias(normalized)) aliases.add(normalized);
+    }
+  }
+  return {
+    observation,
+    phrase,
+    aliases,
+    urls: new Set([...(observation.url ? [canonicalEvidenceUrl(observation.url)] : []), ...(topic?.evidenceUrls ?? []).map(canonicalEvidenceUrl)]),
+    tokens: new Set(contentTokens(phrase).filter((token) => !GENERIC_TOPIC_TOKENS.has(token)))
+  };
+}
+
+function isUsefulGroupingAlias(alias: string): boolean {
+  if (!alias || alias.length < 3) return false;
+  const tokens = tokenize(alias);
+  return tokens.some((token) => !GENERIC_TOPIC_TOKENS.has(token));
+}
+
+function groupFromSignal(signal: TrendGroupSignal): TrendGroup {
+  return {
+    items: [signal.observation],
+    aliases: new Set(signal.aliases),
+    urls: new Set(signal.urls),
+    tokens: new Set(signal.tokens),
+    phrases: new Set([signal.phrase])
+  };
+}
+
+function addSignalToGroup(group: TrendGroup, signal: TrendGroupSignal): void {
+  group.items.push(signal.observation);
+  group.phrases.add(signal.phrase);
+  for (const alias of signal.aliases) group.aliases.add(alias);
+  for (const url of signal.urls) group.urls.add(url);
+  for (const token of signal.tokens) group.tokens.add(token);
+}
+
+function mergeGroups(target: TrendGroup, source: TrendGroup): void {
+  for (const item of source.items) target.items.push(item);
+  for (const alias of source.aliases) target.aliases.add(alias);
+  for (const url of source.urls) target.urls.add(url);
+  for (const token of source.tokens) target.tokens.add(token);
+  for (const phrase of source.phrases) target.phrases.add(phrase);
+}
+
+function groupMatchesSignal(group: TrendGroup, signal: TrendGroupSignal): boolean {
+  if (group.phrases.has(signal.phrase)) return true;
+  if (hasIntersection(group.aliases, signal.aliases)) return true;
+  return hasIntersection(group.urls, signal.urls) && intersectionSize(group.tokens, signal.tokens) >= 2;
+}
+
+function hasIntersection<T>(left: Set<T>, right: Set<T>): boolean {
+  for (const value of right) {
+    if (left.has(value)) return true;
+  }
+  return false;
+}
+
+function intersectionSize<T>(left: Set<T>, right: Set<T>): number {
+  let count = 0;
+  for (const value of right) {
+    if (left.has(value)) count += 1;
+  }
+  return count;
+}
+
+function chooseCanonicalPhrase(items: TrendObservation[], topics: OpenAiMemeTopicRaw[]): string {
+  const candidates = uniqueStrings([
+    ...items.map((item) => item.phrase),
+    ...topics.map((topic) => topic.canonicalPhrase),
+    ...topics.flatMap((topic) => topic.aliases ?? [])
+  ]).map(normalizePhrase);
+  return candidates
+    .filter(Boolean)
+    .sort((a, b) => canonicalPhraseScore(b) - canonicalPhraseScore(a) || a.length - b.length)[0];
+}
+
+function canonicalPhraseScore(phrase: string): number {
+  const tokens = tokenize(phrase);
+  const genericPenalty = tokens.filter((token) => GENERIC_TOPIC_TOKENS.has(token)).length * 4;
+  const usefulTokens = tokens.filter((token) => !GENERIC_TOPIC_TOKENS.has(token)).length;
+  const lengthPenalty = tokens.length > 5 ? tokens.length - 5 : 0;
+  const namedShape = tokens.some((token) => token.length >= 6 && !GENERIC_TOPIC_TOKENS.has(token)) ? 3 : 0;
+  return trendCandidateRank(phrase) + usefulTokens * 2 + namedShape - genericPenalty - lengthPenalty;
+}
+
 function openAiMemeTopicFromObservation(observation: TrendObservation): OpenAiMemeTopicRaw | undefined {
   if (observation.source !== OPENAI_MEME_RADAR_SOURCE) return undefined;
   if (!isJsonObject(observation.raw)) return undefined;
@@ -363,11 +520,11 @@ function buildStructuredTopicRaw(
     aliases: uniqueStrings(topics.flatMap((topic) => topic.aliases ?? [])),
     likelySymbols: uniqueStrings(topics.flatMap((topic) => topic.likelySymbols ?? [])),
     topicType: mostCommonTopicType(topics.map((topic) => topic.topicType).filter(isTrendTopicType)),
-    memeabilityScore: scoreFromStructuredTopics(topics, "memeabilityScore"),
-    tokenizationLikelihood: scoreFromStructuredTopics(topics, "tokenizationLikelihood"),
-    velocityScore: scoreFromStructuredTopics(topics, "velocityScore"),
-    noveltyScore: scoreFromStructuredTopics(topics, "noveltyScore"),
-    saturationRisk: scoreFromStructuredTopics(topics, "saturationRisk"),
+    memeabilityScore: calibratedStructuredScore(topics, "memeabilityScore", phrase, evidenceUrls),
+    tokenizationLikelihood: calibratedStructuredScore(topics, "tokenizationLikelihood", phrase, evidenceUrls),
+    velocityScore: calibratedStructuredScore(topics, "velocityScore", phrase, evidenceUrls),
+    noveltyScore: calibratedStructuredScore(topics, "noveltyScore", phrase, evidenceUrls),
+    saturationRisk: calibratedStructuredScore(topics, "saturationRisk", phrase, evidenceUrls),
     evidenceUrls,
     reasonCodes: uniqueStrings(topics.flatMap((topic) => topic.reasonCodes ?? [])),
     riskFlags: uniqueStrings(topics.flatMap((topic) => topic.riskFlags ?? [])),
@@ -379,6 +536,77 @@ function scoreFromStructuredTopics(topics: OpenAiMemeTopicRaw[], key: keyof Open
   const values = topics.map((topic) => topic[key]).filter((value): value is number => typeof value === "number");
   if (!values.length) return undefined;
   return round(clamp(values.reduce((sum, value) => sum + value, 0) / values.length));
+}
+
+function calibratedStructuredScore(
+  topics: OpenAiMemeTopicRaw[],
+  key: keyof OpenAiMemeTopicRaw,
+  phrase: string,
+  evidenceUrls: string[]
+): number | undefined {
+  const base = scoreFromStructuredTopics(topics, key);
+  if (base === undefined) return undefined;
+  const saturationRisk = scoreFromStructuredTopics(topics, "saturationRisk") ?? 0;
+  const riskFlags = new Set(topics.flatMap((topic) => topic.riskFlags ?? []));
+  if (key === "saturationRisk") {
+    const explicitRisk = [...riskFlags].some((flag) => STALE_OR_SATURATED_RISK_FLAGS.has(flag)) ? 0.72 : 0;
+    return round(clamp(Math.max(base, explicitRisk)));
+  }
+
+  const evidenceDomains = distinctEvidenceDomains(evidenceUrls);
+  const evidenceCap = evidenceDomains.length >= 3 ? 0.98 : evidenceDomains.length >= 2 ? 0.92 : 0.82;
+  const genericCap = isGenericTopicPhrase(phrase) ? 0.72 : 1;
+  const saturationCap =
+    saturationRisk >= 0.75
+      ? key === "tokenizationLikelihood"
+        ? 0.66
+        : key === "noveltyScore"
+          ? 0.58
+          : key === "velocityScore"
+            ? 0.72
+            : 0.78
+      : 1;
+  const backgroundOnly = evidenceDomains.length > 0 && evidenceDomains.every((domain) => BACKGROUND_EVIDENCE_DOMAINS.has(domain));
+  const backgroundCap = backgroundOnly ? (key === "noveltyScore" ? 0.52 : key === "velocityScore" ? 0.62 : 0.84) : 1;
+  const staleRiskCap =
+    [...riskFlags].some((flag) => STALE_OR_SATURATED_RISK_FLAGS.has(flag)) && (key === "noveltyScore" || key === "velocityScore")
+      ? key === "noveltyScore"
+        ? 0.62
+        : 0.78
+      : 1;
+
+  return round(clamp(Math.min(base, evidenceCap, genericCap, saturationCap, backgroundCap, staleRiskCap)));
+}
+
+function isGenericTopicPhrase(phrase: string): boolean {
+  const tokens = tokenize(phrase);
+  if (!tokens.length) return true;
+  const genericCount = tokens.filter((token) => GENERIC_TOPIC_TOKENS.has(token)).length;
+  return genericCount >= 2 || (genericCount >= 1 && tokens.length <= 3);
+}
+
+function distinctEvidenceDomains(urls: string[]): string[] {
+  return [...new Set(urls.map(evidenceDomain).filter((domain): domain is string => Boolean(domain)))];
+}
+
+function evidenceDomain(url: string): string | undefined {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+    return hostname.split(".").slice(-2).join(".");
+  } catch {
+    return undefined;
+  }
+}
+
+function canonicalEvidenceUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    parsed.search = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return url;
+  }
 }
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {

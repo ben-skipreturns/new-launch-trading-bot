@@ -430,6 +430,8 @@ function userPrompt(now: Date, maxTopics: number): string {
     `Current timestamp: ${now.toISOString()}.`,
     `Return up to ${maxTopics} topics. Rank by likelihood that a new Solana launch token will map to the topic soon.`,
     "Keep the JSON compact: launchThesis <= 180 characters, evidenceUrls <= 3, aliases <= 6, likelySymbols <= 5, reasonCodes <= 6, riskFlags <= 4.",
+    "Calibrate scores. Do not set every score to 1.0. Only the top 1 to 3 genuinely exceptional topics may exceed 0.90. Old/background memes need fresh evidence from the last 24 to 72 hours to get high velocity or novelty.",
+    "Use saturationRisk as a real penalty signal: saturated animal categories, stale formats, copycat swarms, and generic labels should have lower tokenizationLikelihood, velocityScore, and noveltyScore.",
     buildCaseStudyPromptSummary(),
     "Reject or heavily penalize: stale clones, tragedy exploitation, generic market/news headlines, forced acronyms, saturated narratives, insider-heavy celebrity/political launches, and copycats without fresh public evidence.",
     "Reason codes should be compact snake_case labels such as tickerable, remixable_visual, viral_animal, public_figure_timing, ai_agent_meta, social_phrase, launchpad_meta, community_takeover, exchange_reflexivity, saturated_clone, tragedy_risk, weak_token_name."

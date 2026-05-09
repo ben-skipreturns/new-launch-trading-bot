@@ -58,7 +58,8 @@ export class TokenMemeMatcher implements MemeMatcher {
               matchStrength: scored.matchStrength,
               velocityScore: scored.topic.velocityScore,
               noveltyScore: scored.topic.noveltyScore,
-              sourceCoverage: scored.topic.sourceCoverage
+              sourceCoverage: scored.topic.sourceCoverage,
+              saturationRisk: saturationRisk(scored.topic)
             }
           : null
       } as JsonValue
@@ -130,11 +131,37 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
   const sourceBoost = clamp(topic.sourceCoverage / 3) * 0.08;
   const velocityBoost = topic.velocityScore * 0.22;
   const noveltyBoost = topic.noveltyScore * 0.08;
-  const score = clamp(matchStrength * (0.62 + sourceBoost + velocityBoost + noveltyBoost));
+  const topicSaturationRisk = saturationRisk(topic);
+  const openAiTopic = hasOpenAiMemeTopic(topic);
+  const saturationPenalty = 1 - topicSaturationRisk * 0.32;
+  const evidencePenalty = openAiTopic && topic.sourceCoverage < 2 ? 0.9 : 1;
+  if (topicSaturationRisk >= 0.75) reasons.push("HIGH_SATURATION_TOPIC");
+  if (openAiTopic && topic.sourceCoverage < 2) reasons.push("SINGLE_SOURCE_TOPIC");
+  const score = clamp(matchStrength * (0.62 + sourceBoost + velocityBoost + noveltyBoost) * saturationPenalty * evidencePenalty);
   return {
     topic,
     score,
     matchStrength,
     reasons: [...new Set(reasons)]
   };
+}
+
+function saturationRisk(topic: TrendTopic): number {
+  const openAiTopic = openAiMemeTopic(topic);
+  if (!isRecord(openAiTopic)) return 0;
+  const value = openAiTopic.saturationRisk;
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value) : 0;
+}
+
+function hasOpenAiMemeTopic(topic: TrendTopic): boolean {
+  return Boolean(openAiMemeTopic(topic));
+}
+
+function openAiMemeTopic(topic: TrendTopic): unknown {
+  if (!isRecord(topic.raw)) return undefined;
+  return topic.raw.openAiMemeTopic;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
