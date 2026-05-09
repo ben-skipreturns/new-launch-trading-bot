@@ -3,9 +3,9 @@ import { ThemeToggle } from "./theme-toggle";
 
 const navItems: NavItem[] = [
   { href: "/", label: "Dashboard" },
-  { href: "/launches", label: "Launches" },
-  { href: "/topics", label: "Topics" },
   { href: "/radar", label: "Radar Review" },
+  { href: "/topics", label: "Topics" },
+  { href: "/launches", label: "Launches" },
   { href: "/positions", label: "Positions" },
   { href: "/local", label: "Local Development" }
 ];
