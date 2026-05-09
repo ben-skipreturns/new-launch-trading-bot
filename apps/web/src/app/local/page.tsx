@@ -113,7 +113,7 @@ export default function LocalLoopPage() {
           <div className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Development runbook</div>
           <h1 className="mt-2 text-3xl font-semibold tracking-normal text-ink">Local Development</h1>
         </div>
-        <div className="rounded-full border border-line bg-white px-3 py-1.5 text-sm font-semibold text-muted">
+        <div className="surface-muted rounded-full px-3 py-1.5 text-sm font-semibold text-muted">
           Postgres host port 5433
         </div>
       </header>
@@ -122,7 +122,7 @@ export default function LocalLoopPage() {
         <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Fast path</h2>
         <div className="mt-4 grid grid-cols-4 gap-3 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
           {quickLoop.map((step, index) => (
-            <div className="rounded-md border border-line bg-white/75 p-4" key={step.title}>
+            <div className="field-tile rounded-md p-4" key={step.title}>
               <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Step {index + 1}</div>
               <h3 className="mt-2 font-semibold text-ink">{step.title}</h3>
               <p className="mt-2 text-sm leading-5 text-muted">{step.body}</p>
@@ -228,7 +228,7 @@ export default function LocalLoopPage() {
 
 function CommandBlock({ command }: { command: string }) {
   return (
-    <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-ink px-3 py-2 text-xs leading-5 text-white">
+    <pre className="code-block mt-3 overflow-x-auto rounded-md px-3 py-2 text-xs leading-5">
       <code>{command}</code>
     </pre>
   );
@@ -236,7 +236,7 @@ function CommandBlock({ command }: { command: string }) {
 
 function PreBlock({ lines }: { lines: string[] }) {
   return (
-    <pre className="mt-4 overflow-x-auto rounded-md border border-line bg-ink p-3 text-xs leading-6 text-white">
+    <pre className="code-block mt-4 overflow-x-auto rounded-md p-3 text-xs leading-6">
       <code>{lines.join("\n")}</code>
     </pre>
   );

@@ -222,7 +222,7 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
 
 function Field({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-line bg-white/70 px-3 py-2">
+    <div className="field-tile rounded-md px-3 py-2">
       <div className="text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
       <div className="mt-1 truncate font-semibold">{value}</div>
     </div>

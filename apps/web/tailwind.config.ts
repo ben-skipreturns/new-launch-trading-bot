@@ -5,18 +5,22 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "#f6f7f9",
-        ink: "#17191f",
-        muted: "#69707d",
-        panel: "#ffffff",
-        line: "#d8dde6",
-        buy: "#0f8f5f",
-        watch: "#b26a00",
-        reject: "#a43d3d",
-        accent: "#2558d4"
+        background: "rgb(var(--color-background) / <alpha-value>)",
+        ink: "rgb(var(--color-ink) / <alpha-value>)",
+        muted: "rgb(var(--color-muted) / <alpha-value>)",
+        panel: "rgb(var(--color-panel) / <alpha-value>)",
+        "panel-muted": "rgb(var(--color-panel-muted) / <alpha-value>)",
+        line: "rgb(var(--color-line) / <alpha-value>)",
+        buy: "rgb(var(--color-buy) / <alpha-value>)",
+        watch: "rgb(var(--color-watch) / <alpha-value>)",
+        reject: "rgb(var(--color-reject) / <alpha-value>)",
+        accent: "rgb(var(--color-accent) / <alpha-value>)",
+        risk: "rgb(var(--color-risk) / <alpha-value>)",
+        code: "rgb(var(--color-code) / <alpha-value>)",
+        "code-text": "rgb(var(--color-code-text) / <alpha-value>)"
       },
       boxShadow: {
-        panel: "0 1px 2px rgba(23, 25, 31, 0.08)"
+        panel: "var(--shadow-panel)"
       }
     }
   },

@@ -235,7 +235,7 @@ function HealthItem({ label, value }: { label: string; value?: Date }) {
 
 function RadarStat({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
-    <div className="rounded-md border border-line bg-white/70 px-3 py-2">
+    <div className="field-tile rounded-md px-3 py-2">
       <div className="text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
       <div className="mt-1 font-semibold">{value}</div>
       <div className="mt-0.5 text-xs text-muted">{detail}</div>
@@ -263,7 +263,7 @@ function SectionHeader({ title, href }: { title: string; href: string }) {
 
 function TopicStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-line bg-white/70 px-2 py-1.5">
+    <div className="field-tile rounded-md px-2 py-1.5">
       <div className="text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
       <div className="font-semibold">{value}</div>
     </div>

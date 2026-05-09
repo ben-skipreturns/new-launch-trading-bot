@@ -2,10 +2,10 @@ type Tone = "neutral" | "good" | "watch" | "bad" | "accent";
 
 const toneClasses: Record<Tone, string> = {
   neutral: "border-line",
-  good: "border-buy/35 bg-buy/5",
-  watch: "border-watch/35 bg-watch/5",
-  bad: "border-reject/35 bg-reject/5",
-  accent: "border-accent/35 bg-accent/5"
+  good: "border-buy/30 bg-buy/10",
+  watch: "border-watch/30 bg-watch/10",
+  bad: "border-reject/30 bg-reject/10",
+  accent: "border-accent/30 bg-accent/10"
 };
 
 export function MetricCard({

@@ -5,12 +5,12 @@ type BadgeTone = "buy" | "watch" | "reject" | "neutral" | "risk" | "open" | "clo
 
 const toneClass: Record<BadgeTone, string> = {
   buy: "border-buy/25 bg-buy/10 text-buy",
-  watch: "border-watch/30 bg-watch/12 text-[#8a5a00]",
+  watch: "border-watch/30 bg-watch/10 text-watch",
   reject: "border-reject/25 bg-reject/10 text-reject",
-  neutral: "border-line bg-panel text-muted",
-  risk: "border-[#8b5cf6]/25 bg-[#8b5cf6]/10 text-[#5b21b6]",
+  neutral: "border-line bg-panel-muted/70 text-muted",
+  risk: "border-risk/25 bg-risk/10 text-risk",
   open: "border-accent/25 bg-accent/10 text-accent",
-  closed: "border-line bg-[#eef1ec] text-muted"
+  closed: "border-line bg-panel-muted text-muted"
 };
 
 export function StatusBadge({ label, tone = "neutral" }: { label: string; tone?: BadgeTone }) {

@@ -23,10 +23,10 @@ export default async function LaunchesPage({ searchParams }: { searchParams?: Pr
           <div className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Scored launches</div>
           <h1 className="mt-2 text-3xl font-semibold tracking-normal text-ink">Launches</h1>
         </div>
-        <div className="flex rounded-md border border-line bg-white p-1">
+        <div className="theme-control flex rounded-lg p-1">
           {sortKeys.map((key) => (
             <Link
-              className={`rounded px-3 py-1.5 text-sm font-semibold ${sort === key ? "bg-ink text-white" : "text-muted hover:text-ink"}`}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${sort === key ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"}`}
               href={`/launches?sort=${key}`}
               key={key}
             >
