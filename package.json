@@ -1,0 +1,45 @@
+{
+  "name": "solana-new-launch-paper-trader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dry-run Solana launchpad paper trader for new meme-token launches.",
+  "packageManager": "npm@11.4.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "check": "npm run typecheck --workspaces",
+    "demo": "node --import tsx apps/bot/src/index.ts demo --fixture fixtures/pumpapi-events.jsonl --report reports/demo.md",
+    "dev": "node --import tsx apps/bot/src/index.ts ingest --source fixture --fixture fixtures/pumpapi-events.jsonl",
+    "dev:web": "npm run dev --workspace @moonshot/web",
+    "lint": "npm run check",
+    "migrate": "node --import tsx apps/bot/src/index.ts migrate",
+    "meme-report": "node --import tsx apps/bot/src/index.ts meme-report",
+    "replay:fixture": "node --import tsx apps/bot/src/index.ts replay --fixture fixtures/pumpapi-events.jsonl --report reports/replay.md",
+    "retention:dry-run": "node --import tsx apps/bot/src/index.ts retention-prune --dry-run",
+    "web:build": "npm run build --workspace @moonshot/web",
+    "web:dev": "npm run dev --workspace @moonshot/web",
+    "test": "vitest run"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "dependencies": {
+    "@types/pg": "^8.11.11",
+    "@types/ws": "^8.5.13",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "kysely": "^0.27.5",
+    "pg": "^8.13.1",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
