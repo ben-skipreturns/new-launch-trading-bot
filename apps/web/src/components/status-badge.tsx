@@ -15,7 +15,7 @@ const toneClass: Record<BadgeTone, string> = {
 
 export function StatusBadge({ label, tone = "neutral" }: { label: string; tone?: BadgeTone }) {
   return (
-    <span className={`inline-flex min-h-6 items-center rounded-full border px-2.5 text-xs font-semibold ${toneClass[tone]}`}>
+    <span className={`inline-flex min-h-5 items-center rounded-full border px-2 text-[0.72rem] font-semibold leading-4 ${toneClass[tone]}`}>
       {label}
     </span>
   );

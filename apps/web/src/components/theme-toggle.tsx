@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from "react";
 
-type ThemePreference = "system" | "light" | "dark";
+type ThemePreference = "light" | "dark";
 
 const storageKey = "moonshot-theme";
-const preferences: ThemePreference[] = ["system", "light", "dark"];
+const preferences: ThemePreference[] = ["light", "dark"];
 
 function cookiePreference(): ThemePreference | undefined {
   const value = document.cookie
@@ -21,66 +21,68 @@ function persistPreference(preference: ThemePreference) {
   window.localStorage.setItem(storageKey, preference);
 }
 
-function resolvedTheme(preference: ThemePreference) {
-  if (preference !== "system") return preference;
+function systemTheme(): ThemePreference {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function applyTheme(preference: ThemePreference) {
-  const resolved = resolvedTheme(preference);
-  document.documentElement.dataset.theme = resolved;
+function applyTheme(theme: ThemePreference, preference: ThemePreference | "system" = theme) {
+  document.documentElement.dataset.theme = theme;
   document.documentElement.dataset.themePreference = preference;
-  document.documentElement.style.colorScheme = resolved;
+  document.documentElement.style.colorScheme = theme;
 }
 
-function storedPreference(): ThemePreference {
+function storedPreference(): ThemePreference | undefined {
   try {
     const stored = window.localStorage.getItem(storageKey) ?? cookiePreference();
-    return preferences.includes(stored as ThemePreference) ? (stored as ThemePreference) : "system";
+    return preferences.includes(stored as ThemePreference) ? (stored as ThemePreference) : undefined;
   } catch {
-    return cookiePreference() ?? "system";
+    return cookiePreference();
   }
 }
 
 export function ThemeToggle() {
-  const [preference, setPreference] = useState<ThemePreference>("system");
+  const [theme, setTheme] = useState<ThemePreference>("light");
 
   useEffect(() => {
-    const initialPreference = storedPreference();
-    setPreference(initialPreference);
-    applyTheme(initialPreference);
+    const stored = storedPreference();
+    const initialTheme = stored ?? systemTheme();
+    setTheme(initialTheme);
+    applyTheme(initialTheme, stored ?? "system");
 
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
-      if (storedPreference() === "system") applyTheme("system");
+      if (!storedPreference()) {
+        const nextTheme = systemTheme();
+        setTheme(nextTheme);
+        applyTheme(nextTheme, "system");
+      }
     };
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
   }, []);
 
-  const choosePreference = (nextPreference: ThemePreference) => {
+  const chooseTheme = (nextTheme: ThemePreference) => {
     try {
-      persistPreference(nextPreference);
+      persistPreference(nextTheme);
     } catch {
-      document.cookie = `${storageKey}=${nextPreference}; path=/; max-age=31536000; samesite=lax`;
+      document.cookie = `${storageKey}=${nextTheme}; path=/; max-age=31536000; samesite=lax`;
     }
-    setPreference(nextPreference);
-    applyTheme(nextPreference);
+    setTheme(nextTheme);
+    applyTheme(nextTheme);
   };
 
   return (
-    <div className="theme-control inline-flex rounded-lg p-1" aria-label="Theme preference">
-      {preferences.map((option) => (
-        <button
-          aria-pressed={preference === option}
-          className={`theme-option ${preference === option ? "theme-option-active" : ""}`}
-          key={option}
-          onClick={() => choosePreference(option)}
-          type="button"
-        >
-          {option}
-        </button>
-      ))}
-    </div>
+    <button
+      aria-label="Toggle light and dark mode"
+      aria-pressed={theme === "dark"}
+      className="theme-switch"
+      onClick={() => chooseTheme(theme === "dark" ? "light" : "dark")}
+      suppressHydrationWarning
+      type="button"
+    >
+      <span className="theme-switch-thumb" />
+      <span className="theme-switch-label theme-switch-label-light">Light</span>
+      <span className="theme-switch-label theme-switch-label-dark">Dark</span>
+    </button>
   );
 }

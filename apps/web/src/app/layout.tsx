@@ -12,18 +12,16 @@ const themeInitScript = `
 (() => {
   try {
     const storageKey = "moonshot-theme";
-    const valid = new Set(["system", "light", "dark"]);
+    const valid = new Set(["light", "dark"]);
     const cookiePreference = document.cookie
       .split("; ")
       .find((row) => row.startsWith(storageKey + "="))
       ?.split("=")[1];
     const stored = window.localStorage.getItem(storageKey) || cookiePreference;
-    const preference = valid.has(stored) ? stored : "system";
-    const resolved = preference === "system"
-      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-      : preference;
+    const preference = valid.has(stored) ? stored : undefined;
+    const resolved = preference || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = resolved;
-    document.documentElement.dataset.themePreference = preference;
+    document.documentElement.dataset.themePreference = preference || "system";
     document.documentElement.style.colorScheme = resolved;
   } catch {
     const cookiePreference = document.cookie
@@ -32,7 +30,7 @@ const themeInitScript = `
       ?.split("=")[1];
     const resolved = cookiePreference === "dark" ? "dark" : "light";
     document.documentElement.dataset.theme = resolved;
-    document.documentElement.dataset.themePreference = cookiePreference || "system";
+    document.documentElement.dataset.themePreference = cookiePreference === "dark" || cookiePreference === "light" ? cookiePreference : "system";
     document.documentElement.style.colorScheme = resolved;
   }
 })();

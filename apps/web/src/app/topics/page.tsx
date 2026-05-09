@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { EmptyState } from "../../components/empty-state";
 import { ErrorPanel } from "../../components/error-panel";
 import { StatusBadge } from "../../components/status-badge";
@@ -29,67 +31,76 @@ export default async function TopicsPage() {
       <section className="panel overflow-hidden rounded-md">
         {topics.data.length ? (
           <div className="overflow-x-auto">
-            <table className="data-table">
+            <table className="data-table topics-table">
+              <colgroup>
+                <col className="w-[31%]" />
+                <col className="w-[19%]" />
+                <col className="w-[28%]" />
+                <col className="w-[10%]" />
+                <col className="w-[12%]" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>Topic</th>
-                  <th>Type</th>
-                  <th>Radar</th>
-                  <th>Momentum</th>
-                  <th>Symbols</th>
-                  <th>Reasons / risks</th>
-                  <th>Matches</th>
-                  <th>Last seen</th>
+                  <th>Scores</th>
+                  <th>Signals</th>
+                  <th>Activity</th>
                   <th>Evidence</th>
                 </tr>
               </thead>
               <tbody>
                 {topics.data.map((topic) => (
                   <tr key={topic.id}>
-                    <td className="min-w-[220px]">
-                      <div className="font-semibold">{topic.canonicalPhrase}</div>
-                      {topic.launchThesis ? <div className="mt-1 max-w-[320px] text-xs text-muted">{topic.launchThesis}</div> : null}
-                      <div className="text-xs text-muted">first seen {formatDate(topic.firstSeen)}</div>
+                    <td>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="font-semibold leading-5 text-ink">{topic.canonicalPhrase}</div>
+                        <StatusBadge label={topic.topicType.replace("_", " ")} tone="open" />
+                      </div>
+                      {topic.launchThesis ? <div className="topic-thesis mt-1 text-xs leading-4 text-muted">{topic.launchThesis}</div> : null}
+                      <div className="mt-1 text-xs text-muted">first seen {formatDate(topic.firstSeen)}</div>
                     </td>
                     <td>
-                      <StatusBadge label={topic.topicType.replace("_", " ")} tone="open" />
+                      <div className="topic-score-grid">
+                        <CompactStat label="Meme" value={formatScore(topic.memeabilityScore)} />
+                        <CompactStat label="Token" value={formatScore(topic.tokenizationLikelihood)} />
+                        <CompactStat label="Sat" value={formatScore(topic.saturationRisk)} />
+                        <CompactStat label="Vel" value={formatScore(topic.velocityScore)} />
+                        <CompactStat label="Novel" value={formatScore(topic.noveltyScore)} />
+                        <CompactStat label="Src" value={String(topic.sourceCoverage)} />
+                      </div>
                     </td>
-                    <td className="min-w-[130px]">
-                      <CompactStat label="Meme" value={formatScore(topic.memeabilityScore)} />
-                      <CompactStat label="Tokenize" value={formatScore(topic.tokenizationLikelihood)} />
-                      <CompactStat label="Sat" value={formatScore(topic.saturationRisk)} />
-                    </td>
-                    <td className="min-w-[120px]">
-                      <CompactStat label="Vel" value={formatScore(topic.velocityScore)} />
-                      <CompactStat label="Novel" value={formatScore(topic.noveltyScore)} />
-                      <CompactStat label="Src" value={String(topic.sourceCoverage)} />
-                    </td>
-                    <td className="min-w-[150px]">
-                      {topic.likelySymbols.length ? (
-                        <div className="flex flex-wrap gap-1">
-                          {topic.likelySymbols.slice(0, 5).map((symbol) => (
-                            <StatusBadge label={symbol} key={symbol} />
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-muted">-</span>
-                      )}
-                    </td>
-                    <td className="min-w-[220px]">
-                      <SignalList values={topic.reasonCodes} tone="open" empty="no reasons" />
-                      {topic.riskFlags.length ? <SignalList values={topic.riskFlags} tone="reject" empty="" /> : null}
-                    </td>
-                    <td>{topic.matchedLaunches}</td>
                     <td>
-                      <div>{formatAge(topic.lastSeen)}</div>
+                      <SignalGroup label="Symbols">
+                        {topic.likelySymbols.length ? (
+                          <div className="flex flex-wrap gap-1">
+                            {topic.likelySymbols.slice(0, 5).map((symbol) => (
+                              <StatusBadge label={symbol} key={symbol} />
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-muted">-</span>
+                        )}
+                      </SignalGroup>
+                      <SignalGroup label="Reasons">
+                        <SignalList values={topic.reasonCodes} tone="open" empty="no reasons" />
+                      </SignalGroup>
+                      {topic.riskFlags.length ? (
+                        <SignalGroup label="Risks">
+                          <SignalList values={topic.riskFlags} tone="reject" empty="" />
+                        </SignalGroup>
+                      ) : null}
+                    </td>
+                    <td>
+                      <div className="font-semibold text-ink">{topic.matchedLaunches} matches</div>
+                      <div className="mt-1 text-xs text-muted">seen {formatAge(topic.lastSeen)}</div>
                       <div className="text-xs text-muted">{formatDate(topic.lastSeen)}</div>
                     </td>
-                    <td className="max-w-[360px]">
+                    <td>
                       {topic.evidenceUrls.length ? (
                         <div className="space-y-1">
                           {topic.evidenceUrls.slice(0, 2).map((url) => (
-                            <a className="block truncate text-sm font-medium text-accent hover:text-ink" href={url} key={url} rel="noreferrer" target="_blank">
-                              {url}
+                            <a className="evidence-link hover:text-ink" href={url} key={url} rel="noreferrer" target="_blank" title={url}>
+                              <span>{evidenceLabel(url)}</span>
                             </a>
                           ))}
                         </div>
@@ -114,18 +125,27 @@ export default async function TopicsPage() {
 
 function RadarMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="panel rounded-md p-3">
+    <div className="panel rounded-md p-4">
       <div className="text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
-      <div className="mt-1 truncate font-semibold">{value}</div>
+      <div className="mt-2 truncate text-lg font-semibold text-ink">{value}</div>
     </div>
   );
 }
 
 function CompactStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 text-sm">
+    <div className="stat-stack-row">
       <span className="text-muted">{label}</span>
-      <span className="font-medium">{value}</span>
+      <span className="font-semibold text-ink">{value}</span>
+    </div>
+  );
+}
+
+function SignalGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="signal-group">
+      <div className="signal-group-label">{label}</div>
+      <div>{children}</div>
     </div>
   );
 }
@@ -133,10 +153,19 @@ function CompactStat({ label, value }: { label: string; value: string }) {
 function SignalList({ values, tone, empty }: { values: string[]; tone: "open" | "reject"; empty: string }) {
   if (!values.length) return empty ? <span className="text-sm text-muted">{empty}</span> : null;
   return (
-    <div className="mb-1 flex flex-wrap gap-1">
-      {values.slice(0, 4).map((value) => (
+    <div className="mb-1.5 flex flex-wrap gap-1.5">
+      {values.slice(0, 5).map((value) => (
         <StatusBadge label={value.replaceAll("_", " ")} tone={tone} key={value} />
       ))}
     </div>
   );
+}
+
+function evidenceLabel(url: string) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
 }
