@@ -7,6 +7,7 @@ const navItems: NavItem[] = [
   { href: "/topics", label: "Topics" },
   { href: "/launches", label: "Launches" },
   { href: "/positions", label: "Positions" },
+  { href: "/lifecycle", label: "Lifecycle" },
   { href: "/local", label: "Local Development" }
 ];
 
