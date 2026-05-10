@@ -59,6 +59,13 @@ const tokenMatchLoop = [
   'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>" --persist'
 ];
 
+const retentionLoop = [
+  "npm run retention:launch-dry-run",
+  "npm run start --workspace @moonshot/bot -- retention-prune --prune-launches --dry-run",
+  "npm run start --workspace @moonshot/bot -- retention-prune --prune-launches",
+  "npm run start --workspace @moonshot/bot -- retention-prune --prune-launches --raw-launch-hours 48 --matched-launch-days 7 --rejected-launch-days 14"
+];
+
 const resetLoop = [
   "docker compose down -v",
   "docker compose up -d db",
@@ -239,6 +246,21 @@ export default function LocalLoopPage() {
       </section>
 
       <section className="panel rounded-md p-5">
+        <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-5 max-[980px]:grid-cols-1">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Retention loop</h2>
+            <p className="mt-3 text-sm leading-6 text-muted">
+              Use this to keep the local database cheap while preserving launches that were matched, scored, watched, bought, or had paper-trading activity.
+            </p>
+            <p className="mt-3 text-sm leading-6 text-muted">
+              Always run the dry-run first. Launch pruning deletes token_launches and cascades dependent rows for uninteresting expired tokens.
+            </p>
+          </div>
+          <PreBlock lines={retentionLoop} />
+        </div>
+      </section>
+
+      <section className="panel rounded-md p-5">
         <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Inspect data</h2>
         <div className="mt-4 grid grid-cols-2 gap-4 max-[1120px]:grid-cols-1">
           {inspectCommands.map((item) => (
@@ -270,6 +292,7 @@ export default function LocalLoopPage() {
                 <CommandRow command="npm run start --workspace @moonshot/bot -- trend-refresh" writes="Yes" purpose="Runs the OpenAI meme radar and writes topics, observations, and refresh audit rows." />
                 <CommandRow command="npm run stream:test -- --source pumpapi" writes="Optional" purpose="Prints live token create events; add --persist to store only raw creates and token launches." />
                 <CommandRow command={'npm run match:token -- --name "..." --symbol "..."'} writes="Optional" purpose="Tests token text against active or fixture topics; add --persist to store the local match." />
+                <CommandRow command="npm run retention:launch-dry-run" writes="No" purpose="Counts expired raw/trade events and uninteresting token launches without deleting them." />
                 <CommandRow command="npm run migrate" writes="Yes" purpose="Applies SQL schema migrations to the configured database." />
                 <CommandRow command="npm run web:dev" writes="No" purpose="Starts the read-only Next.js command center." />
                 <CommandRow command="npm run check" writes="No" purpose="Runs TypeScript checks across workspaces." />

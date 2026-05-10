@@ -223,29 +223,48 @@ program
 
 program
   .command("retention-prune")
-  .description("Delete expired raw/trade events while keeping durable launch, feature, score, paper, and meme-match data.")
+  .description("Delete expired raw/trade events, with optional pruning of uninteresting token launches.")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--rejected-hours <hours>", "Raw retention for rejected/uninteresting launches", "48")
   .option("--interesting-days <days>", "Raw retention for watch/paper-buy launches", "14")
+  .option("--prune-launches", "Also delete expired uninteresting token_launches and dependent rows", false)
+  .option("--raw-launch-hours <hours>", "Launch retention for raw-only launches with no match or score", "48")
+  .option("--matched-launch-days <days>", "Launch retention for matched launches with no score", "7")
+  .option("--rejected-launch-days <days>", "Launch retention for scored rejects with no paper order", "14")
   .option("--dry-run", "Count rows that would be deleted without deleting", false)
-  .action(async (options: { databaseUrl?: string; rejectedHours: string; interestingDays: string; dryRun: boolean }) => {
-    const store = createStore(options.databaseUrl);
-    try {
-      const result = await store.pruneRetention({
-        now: new Date(),
-        rejectedRawRetentionHours: Number(options.rejectedHours),
-        interestingRawRetentionDays: Number(options.interestingDays),
-        dryRun: options.dryRun
-      });
-      console.log(
-        `${options.dryRun ? "Would delete" : "Deleted"} ${result.rawEventsDeleted} raw events and ${
-          result.tradeEventsDeleted
-        } trade events.`
-      );
-    } finally {
-      await closeStore(store);
+  .action(
+    async (options: {
+      databaseUrl?: string;
+      rejectedHours: string;
+      interestingDays: string;
+      pruneLaunches: boolean;
+      rawLaunchHours: string;
+      matchedLaunchDays: string;
+      rejectedLaunchDays: string;
+      dryRun: boolean;
+    }) => {
+      const store = createStore(options.databaseUrl);
+      try {
+        const result = await store.pruneRetention({
+          now: new Date(),
+          rejectedRawRetentionHours: Number(options.rejectedHours),
+          interestingRawRetentionDays: Number(options.interestingDays),
+          pruneLaunches: options.pruneLaunches,
+          rawLaunchRetentionHours: Number(options.rawLaunchHours),
+          matchedLaunchRetentionDays: Number(options.matchedLaunchDays),
+          rejectedLaunchRetentionDays: Number(options.rejectedLaunchDays),
+          dryRun: options.dryRun
+        });
+        console.log(
+          `${options.dryRun ? "Would delete" : "Deleted"} ${result.rawEventsDeleted} raw events and ${
+            result.tradeEventsDeleted
+          } trade events${options.pruneLaunches ? `, plus ${result.tokenLaunchesDeleted} token launches` : ""}.`
+        );
+      } finally {
+        await closeStore(store);
+      }
     }
-  });
+  );
 
 program
   .command("migrate")

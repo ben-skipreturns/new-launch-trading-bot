@@ -272,9 +272,14 @@ export interface RetentionPruneOptions {
   rejectedRawRetentionHours: number;
   interestingRawRetentionDays: number;
   dryRun: boolean;
+  pruneLaunches?: boolean;
+  rawLaunchRetentionHours?: number;
+  matchedLaunchRetentionDays?: number;
+  rejectedLaunchRetentionDays?: number;
 }
 
 export interface RetentionPruneResult {
   rawEventsDeleted: number;
   tradeEventsDeleted: number;
+  tokenLaunchesDeleted: number;
 }

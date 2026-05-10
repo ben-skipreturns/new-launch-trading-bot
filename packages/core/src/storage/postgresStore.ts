@@ -702,6 +702,15 @@ export class PostgresStore implements Store {
     const interestingCutoff = new Date(options.now.getTime() - options.interestingRawRetentionDays * 24 * 60 * 60 * 1000);
     const rawEventsDeleted = await countOrDeleteExpiredRawEvents(this.db, rejectedCutoff, interestingCutoff, options.dryRun);
     const tradeEventsDeleted = await countOrDeleteExpiredTradeEvents(this.db, rejectedCutoff, interestingCutoff, options.dryRun);
+    const tokenLaunchesDeleted = options.pruneLaunches
+      ? await countOrDeleteExpiredTokenLaunches(
+          this.db,
+          new Date(options.now.getTime() - (options.rawLaunchRetentionHours ?? 48) * 60 * 60 * 1000),
+          new Date(options.now.getTime() - (options.matchedLaunchRetentionDays ?? 7) * 24 * 60 * 60 * 1000),
+          new Date(options.now.getTime() - (options.rejectedLaunchRetentionDays ?? 14) * 24 * 60 * 60 * 1000),
+          options.dryRun
+        )
+      : 0;
 
     if (!options.dryRun) {
       await this.insertRetentionRun({
@@ -715,7 +724,7 @@ export class PostgresStore implements Store {
       });
     }
 
-    return { rawEventsDeleted, tradeEventsDeleted };
+    return { rawEventsDeleted, tradeEventsDeleted, tokenLaunchesDeleted };
   }
 }
 
@@ -961,10 +970,29 @@ async function countOrDeleteExpiredTradeEvents(
   return Number(result.rows[0]?.count ?? 0);
 }
 
+async function countOrDeleteExpiredTokenLaunches(
+  db: Kysely<Database>,
+  rawLaunchCutoff: Date,
+  matchedLaunchCutoff: Date,
+  rejectedLaunchCutoff: Date,
+  dryRun: boolean
+): Promise<number> {
+  const query = expiredTokenLaunchesPredicate(rawLaunchCutoff, matchedLaunchCutoff, rejectedLaunchCutoff);
+  if (dryRun) {
+    const result = await sql<{ count: string }>`select count(*)::text as count from token_launches where ${query}`.execute(db);
+    return Number(result.rows[0]?.count ?? 0);
+  }
+  const result =
+    await sql<{ count: string }>`with deleted as (delete from token_launches where ${query} returning 1) select count(*)::text as count from deleted`.execute(
+      db
+    );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
 function expiredRawEventsPredicate(rejectedCutoff: Date, interestingCutoff: Date) {
   return sql`
     (
-      mint is null and observed_at < ${rejectedCutoff}
+      mint is null and observed_at < cast(${rejectedCutoff} as timestamptz)
     )
     or (
       mint is not null
@@ -979,9 +1007,38 @@ function expiredRawEventsPredicate(rejectedCutoff: Date, interestingCutoff: Date
           where p.mint = raw_events.mint
             and p.status = 'filled'
         )
-        then ${interestingCutoff}
-        else ${rejectedCutoff}
+        then cast(${interestingCutoff} as timestamptz)
+        else cast(${rejectedCutoff} as timestamptz)
       end
+    )
+  `;
+}
+
+function expiredTokenLaunchesPredicate(rawLaunchCutoff: Date, matchedLaunchCutoff: Date, rejectedLaunchCutoff: Date) {
+  return sql`
+    not exists (select 1 from paper_orders p where p.mint = token_launches.mint)
+    and not exists (select 1 from paper_positions p where p.mint = token_launches.mint)
+    and not exists (select 1 from exit_events e where e.mint = token_launches.mint)
+    and (
+      (
+        created_at < cast(${rawLaunchCutoff} as timestamptz)
+        and not exists (select 1 from token_meme_matches m where m.mint = token_launches.mint)
+        and not exists (select 1 from score_snapshots s where s.mint = token_launches.mint)
+      )
+      or (
+        created_at < cast(${matchedLaunchCutoff} as timestamptz)
+        and exists (select 1 from token_meme_matches m where m.mint = token_launches.mint)
+        and not exists (select 1 from score_snapshots s where s.mint = token_launches.mint)
+      )
+      or (
+        created_at < cast(${rejectedLaunchCutoff} as timestamptz)
+        and exists (select 1 from score_snapshots s where s.mint = token_launches.mint)
+        and not exists (
+          select 1 from score_snapshots s
+          where s.mint = token_launches.mint
+            and s.decision in ('paper_buy', 'watch')
+        )
+      )
     )
   `;
 }
@@ -999,8 +1056,8 @@ function expiredTradeEventsPredicate(rejectedCutoff: Date, interestingCutoff: Da
         where p.mint = trade_events.mint
           and p.status = 'filled'
       )
-      then ${interestingCutoff}
-      else ${rejectedCutoff}
+      then cast(${interestingCutoff} as timestamptz)
+      else cast(${rejectedCutoff} as timestamptz)
     end
   `;
 }

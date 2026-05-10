@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MemoryStore } from "../storage/memoryStore.js";
-import type { LaunchEvent, ScoreSnapshot, TokenLaunch, TradeEvent } from "../domain/types.js";
+import type { LaunchEvent, PaperOrder, ScoreSnapshot, TokenLaunch, TokenMemeMatch, TradeEvent } from "../domain/types.js";
 
 describe("retention pruning", () => {
   it("keeps interesting raw events longer than rejected events", async () => {
@@ -35,6 +35,47 @@ describe("retention pruning", () => {
     expect(deleted.tradeEventsDeleted).toBe(1);
     expect(store.rawEvents.size).toBe(1);
     expect(store.trades.size).toBe(1);
+  });
+
+  it("prunes only uninteresting token launches when launch pruning is enabled", async () => {
+    const store = new MemoryStore();
+    const old = new Date("2026-05-01T12:00:00.000Z");
+    const now = new Date("2026-05-20T12:00:00.000Z");
+    await store.upsertTokenLaunch(launch("RawOnlyMint", old));
+    await store.upsertTokenLaunch(launch("MatchedMint", old));
+    await store.upsertTokenLaunch(launch("RejectedMint", old));
+    await store.upsertTokenLaunch(launch("WatchMint", old));
+    await store.upsertTokenLaunch(launch("OrderedMint", old));
+    await store.upsertTokenMemeMatch(match("MatchedMint", old));
+    await store.insertScoreSnapshot(score("RejectedMint", "reject", old));
+    await store.insertScoreSnapshot(score("WatchMint", "watch", old));
+    await store.insertPaperOrder(order("OrderedMint", old));
+
+    const dryRun = await store.pruneRetention({
+      now,
+      rejectedRawRetentionHours: 48,
+      interestingRawRetentionDays: 14,
+      pruneLaunches: true,
+      rawLaunchRetentionHours: 48,
+      matchedLaunchRetentionDays: 7,
+      rejectedLaunchRetentionDays: 14,
+      dryRun: true
+    });
+    expect(dryRun.tokenLaunchesDeleted).toBe(3);
+    expect(store.launches.size).toBe(5);
+
+    const deleted = await store.pruneRetention({
+      now,
+      rejectedRawRetentionHours: 48,
+      interestingRawRetentionDays: 14,
+      pruneLaunches: true,
+      rawLaunchRetentionHours: 48,
+      matchedLaunchRetentionDays: 7,
+      rejectedLaunchRetentionDays: 14,
+      dryRun: false
+    });
+    expect(deleted.tokenLaunchesDeleted).toBe(3);
+    expect([...store.launches.keys()].sort()).toEqual(["OrderedMint", "WatchMint"]);
   });
 });
 
@@ -71,6 +112,39 @@ function trade(mint: string, occurredAt: Date): TradeEvent {
     isBotLike: false,
     isWashTrade: false,
     raw: {}
+  };
+}
+
+function match(mint: string, observedAt: Date): TokenMemeMatch {
+  return {
+    mint,
+    observedAt,
+    memeRelevanceScore: 0.8,
+    topicId: "topic",
+    canonicalPhrase: "topic",
+    topicType: "other",
+    aliases: [],
+    evidenceUrls: [],
+    reasons: [],
+    rejectFlags: [],
+    raw: {}
+  };
+}
+
+function order(mint: string, createdAt: Date): PaperOrder {
+  return {
+    id: `order-${mint}`,
+    mint,
+    side: "buy",
+    status: "rejected",
+    reason: "test",
+    createdAt,
+    solAmount: 0,
+    tokenAmount: 0,
+    priceSol: 0,
+    feesSol: 0,
+    slippageSol: 0,
+    scoreSnapshot: score(mint, "reject", createdAt)
   };
 }
 

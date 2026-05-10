@@ -191,6 +191,8 @@ export class MemoryStore implements Store {
     for (const order of this.orders.values()) {
       if (order.status === "filled") interestingMints.add(order.mint);
     }
+    for (const position of this.positions.values()) interestingMints.add(position.mint);
+    for (const exit of this.exits.values()) interestingMints.add(exit.mint);
 
     const rejectedCutoff = options.now.getTime() - options.rejectedRawRetentionHours * 60 * 60 * 1000;
     const interestingCutoff = options.now.getTime() - options.interestingRawRetentionDays * 24 * 60 * 60 * 1000;
@@ -200,10 +202,31 @@ export class MemoryStore implements Store {
     const tradeKeysToDelete = [...this.trades.entries()]
       .filter(([, trade]) => isExpired(trade.mint, trade.occurredAt, interestingMints, rejectedCutoff, interestingCutoff))
       .map(([key]) => key);
+    const launchKeysToDelete = options.pruneLaunches ? this.expiredLaunchMints(options) : [];
 
     if (!options.dryRun) {
       rawKeysToDelete.forEach((key) => this.rawEvents.delete(key));
       tradeKeysToDelete.forEach((key) => this.trades.delete(key));
+      launchKeysToDelete.forEach((mint) => {
+        this.launches.delete(mint);
+        [...this.rawEvents.entries()].forEach(([key, event]) => {
+          if (event.mint === mint) this.rawEvents.delete(key);
+        });
+        [...this.trades.entries()].forEach(([key, trade]) => {
+          if (trade.mint === mint) this.trades.delete(key);
+        });
+        this.enrichments.splice(0, this.enrichments.length, ...this.enrichments.filter((item) => item.mint !== mint));
+        this.features.splice(0, this.features.length, ...this.features.filter((item) => item.mint !== mint));
+        this.scores.splice(0, this.scores.length, ...this.scores.filter((item) => item.mint !== mint));
+        [...this.orders.entries()].forEach(([key, order]) => {
+          if (order.mint === mint) this.orders.delete(key);
+        });
+        this.positions.delete(mint);
+        [...this.exits.entries()].forEach(([key, exit]) => {
+          if (exit.mint === mint) this.exits.delete(key);
+        });
+        this.memeMatches.splice(0, this.memeMatches.length, ...this.memeMatches.filter((item) => item.mint !== mint));
+      });
       await this.insertRetentionRun({
         id: `retention:${options.now.toISOString()}`,
         ranAt: options.now,
@@ -217,9 +240,29 @@ export class MemoryStore implements Store {
 
     return {
       rawEventsDeleted: rawKeysToDelete.length,
-      tradeEventsDeleted: tradeKeysToDelete.length
+      tradeEventsDeleted: tradeKeysToDelete.length,
+      tokenLaunchesDeleted: launchKeysToDelete.length
     };
   }
+
+  private expiredLaunchMints(options: RetentionPruneOptions): string[] {
+    const rawLaunchCutoff = options.now.getTime() - (options.rawLaunchRetentionHours ?? 48) * 60 * 60 * 1000;
+    const matchedLaunchCutoff = options.now.getTime() - (options.matchedLaunchRetentionDays ?? 7) * 24 * 60 * 60 * 1000;
+    const rejectedLaunchCutoff = options.now.getTime() - (options.rejectedLaunchRetentionDays ?? 14) * 24 * 60 * 60 * 1000;
+    return [...this.launches.values()].filter((launch) => this.isExpiredLaunch(launch, rawLaunchCutoff, matchedLaunchCutoff, rejectedLaunchCutoff)).map((launch) => launch.mint);
+  }
+
+  private isExpiredLaunch(launch: TokenLaunch, rawLaunchCutoff: number, matchedLaunchCutoff: number, rejectedLaunchCutoff: number): boolean {
+    const mint = launch.mint;
+    const createdAt = launch.createdAt.getTime();
+    if ([...this.orders.values()].some((order) => order.mint === mint) || this.positions.has(mint) || [...this.exits.values()].some((exit) => exit.mint === mint)) return false;
+    const scores = this.scores.filter((score) => score.mint === mint);
+    if (scores.some((score) => score.decision === "paper_buy" || score.decision === "watch")) return false;
+    if (scores.length > 0) return createdAt < rejectedLaunchCutoff;
+    if (this.memeMatches.some((match) => match.mint === mint)) return createdAt < matchedLaunchCutoff;
+    return createdAt < rawLaunchCutoff;
+  }
+
 }
 
 function between<T>(items: T[], getDate: (item: T) => Date, from?: Date, to?: Date): T[] {
