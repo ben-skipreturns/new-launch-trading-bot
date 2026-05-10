@@ -12,6 +12,8 @@ import type {
   RadarReview,
   RadarReviewCandidate,
   RadarReviewRun,
+  RawLaunchListItem,
+  RawLaunchPage,
   TopicListItem,
   TrendRadarHealth,
   LaunchListItem
@@ -60,6 +62,12 @@ export async function getLaunchList(sort: "latest" | "meme" | "risk" | "ev" = "l
     if (sort === "ev") return launches.sort((a, b) => b.expectedValueScore - a.expectedValueScore);
     return launches;
   });
+}
+
+export async function getRawLaunchPage(page = 1, pageSize = 25): Promise<DataState<RawLaunchPage>> {
+  const normalizedPage = Math.max(1, Math.floor(page));
+  const normalizedPageSize = Math.min(100, Math.max(10, Math.floor(pageSize)));
+  return safeRead(emptyRawLaunchPage(normalizedPage, normalizedPageSize), () => getRawLaunches(normalizedPage, normalizedPageSize));
 }
 
 export async function getTopicList(): Promise<DataState<TopicListItem[]>> {
@@ -181,6 +189,47 @@ async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined
     [mint]
   );
   return rows[0] ? launchFromRow(rows[0]) : undefined;
+}
+
+async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunchPage> {
+  const offset = (page - 1) * pageSize;
+  const [rows, countRows] = await Promise.all([
+    query<RawLaunchRow>(
+      `select
+         tl.mint,
+         tl.source,
+         tl.signature,
+         tl.pool,
+         tl.creator,
+         tl.name,
+         tl.symbol,
+         tl.uri,
+         tl.supply,
+         tl.created_at,
+         tl.initial_buy_tokens,
+         tl.initial_buy_sol,
+         tl.v_sol_in_bonding_curve,
+         tl.market_cap_sol,
+         exists(select 1 from token_meme_matches m where m.mint = tl.mint) as has_meme_match,
+         exists(select 1 from score_snapshots s where s.mint = tl.mint) as has_score
+       from token_launches tl
+       order by tl.created_at desc
+       limit $1 offset $2`,
+      [pageSize, offset]
+    ),
+    query<{ total_count: string }>(`select count(*)::text as total_count from token_launches`)
+  ]);
+  const total = Number(countRows[0]?.total_count ?? 0);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  return {
+    items: rows.map(rawLaunchFromRow),
+    total,
+    page,
+    pageSize,
+    totalPages,
+    hasPrevious: page > 1,
+    hasNext: offset + rows.length < total
+  };
 }
 
 async function getPositions(limit = 50): Promise<PositionListItem[]> {
@@ -385,6 +434,18 @@ function emptyRadarReview(): RadarReview {
   };
 }
 
+function emptyRawLaunchPage(page: number, pageSize: number): RawLaunchPage {
+  return {
+    items: [],
+    total: 0,
+    page,
+    pageSize,
+    totalPages: 1,
+    hasPrevious: false,
+    hasNext: false
+  };
+}
+
 interface LaunchRow {
   mint: string;
   name: string | null;
@@ -398,6 +459,25 @@ interface LaunchRow {
   decision: string;
   reasons: string[];
   feature_snapshot: ScoreSnapshot["features"];
+}
+
+interface RawLaunchRow {
+  mint: string;
+  source: string;
+  signature: string;
+  pool: string;
+  creator: string | null;
+  name: string | null;
+  symbol: string | null;
+  uri: string | null;
+  supply: string | null;
+  created_at: Date;
+  initial_buy_tokens: string | null;
+  initial_buy_sol: string | null;
+  v_sol_in_bonding_curve: string | null;
+  market_cap_sol: string | null;
+  has_meme_match: boolean;
+  has_score: boolean;
 }
 
 interface PositionRow {
@@ -508,6 +588,27 @@ function launchFromRow(row: LaunchRow): LaunchListItem {
     memeTopicType: features.memeMatchedTopicType,
     latestPriceSol: features.priceSol,
     reasons: row.reasons
+  };
+}
+
+function rawLaunchFromRow(row: RawLaunchRow): RawLaunchListItem {
+  return {
+    mint: row.mint,
+    source: row.source,
+    signature: row.signature,
+    pool: row.pool,
+    creator: row.creator ?? undefined,
+    name: row.name ?? undefined,
+    symbol: row.symbol ?? undefined,
+    uri: row.uri ?? undefined,
+    supply: numericValue(row.supply),
+    createdAt: row.created_at,
+    initialBuyTokens: numericValue(row.initial_buy_tokens),
+    initialBuySol: numericValue(row.initial_buy_sol),
+    vSolInBondingCurve: numericValue(row.v_sol_in_bonding_curve),
+    marketCapSol: numericValue(row.market_cap_sol),
+    hasMemeMatch: row.has_meme_match,
+    hasScore: row.has_score
   };
 }
 
@@ -743,6 +844,12 @@ function stringArray(value: unknown): string[] {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function numericValue(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function stringValue(value: unknown): string | undefined {

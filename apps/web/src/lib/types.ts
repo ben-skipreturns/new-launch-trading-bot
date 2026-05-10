@@ -100,6 +100,35 @@ export interface LaunchListItem {
   reasons: string[];
 }
 
+export interface RawLaunchListItem {
+  mint: string;
+  source: string;
+  signature: string;
+  pool: string;
+  creator?: string;
+  name?: string;
+  symbol?: string;
+  uri?: string;
+  supply?: number;
+  createdAt: Date;
+  initialBuyTokens?: number;
+  initialBuySol?: number;
+  vSolInBondingCurve?: number;
+  marketCapSol?: number;
+  hasMemeMatch: boolean;
+  hasScore: boolean;
+}
+
+export interface RawLaunchPage {
+  items: RawLaunchListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+}
+
 export interface PositionListItem {
   mint: string;
   name?: string;

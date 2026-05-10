@@ -5,6 +5,7 @@ const navItems: NavItem[] = [
   { href: "/", label: "Dashboard" },
   { href: "/radar", label: "Radar Review" },
   { href: "/topics", label: "Topics" },
+  { href: "/stream", label: "Stream" },
   { href: "/launches", label: "Launches" },
   { href: "/positions", label: "Positions" },
   { href: "/lifecycle", label: "Lifecycle" },
