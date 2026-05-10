@@ -14,6 +14,7 @@ import type {
   RadarReviewRun,
   RawLaunchListItem,
   RawLaunchPage,
+  RawLaunchStats,
   TopicListItem,
   TrendRadarHealth,
   LaunchListItem
@@ -193,7 +194,7 @@ async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined
 
 async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunchPage> {
   const offset = (page - 1) * pageSize;
-  const [rows, countRows] = await Promise.all([
+  const [rows, statsRows] = await Promise.all([
     query<RawLaunchRow>(
       `select
          tl.mint,
@@ -217,13 +218,26 @@ async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunch
        limit $1 offset $2`,
       [pageSize, offset]
     ),
-    query<{ total_count: string }>(`select count(*)::text as total_count from token_launches`)
+    query<RawLaunchStatsRow>(
+      `select
+         count(*)::text as total_count,
+         count(*) filter (
+           where not exists(select 1 from token_meme_matches m where m.mint = tl.mint)
+             and not exists(select 1 from score_snapshots s where s.mint = tl.mint)
+         )::text as raw_only_count,
+         count(*) filter (where exists(select 1 from token_meme_matches m where m.mint = tl.mint))::text as matched_count,
+         count(*) filter (where exists(select 1 from score_snapshots s where s.mint = tl.mint))::text as scored_count,
+         max(created_at) as latest_created_at
+       from token_launches tl`
+    )
   ]);
-  const total = Number(countRows[0]?.total_count ?? 0);
+  const stats = rawLaunchStatsFromRow(statsRows[0]);
+  const total = stats.total;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   return {
     items: rows.map(rawLaunchFromRow),
     total,
+    stats,
     page,
     pageSize,
     totalPages,
@@ -438,6 +452,12 @@ function emptyRawLaunchPage(page: number, pageSize: number): RawLaunchPage {
   return {
     items: [],
     total: 0,
+    stats: {
+      total: 0,
+      rawOnly: 0,
+      matched: 0,
+      scored: 0
+    },
     page,
     pageSize,
     totalPages: 1,
@@ -478,6 +498,14 @@ interface RawLaunchRow {
   market_cap_sol: string | null;
   has_meme_match: boolean;
   has_score: boolean;
+}
+
+interface RawLaunchStatsRow {
+  total_count: string;
+  raw_only_count: string;
+  matched_count: string;
+  scored_count: string;
+  latest_created_at: Date | null;
 }
 
 interface PositionRow {
@@ -609,6 +637,16 @@ function rawLaunchFromRow(row: RawLaunchRow): RawLaunchListItem {
     marketCapSol: numericValue(row.market_cap_sol),
     hasMemeMatch: row.has_meme_match,
     hasScore: row.has_score
+  };
+}
+
+function rawLaunchStatsFromRow(row: RawLaunchStatsRow | undefined): RawLaunchStats {
+  return {
+    total: Number(row?.total_count ?? 0),
+    rawOnly: Number(row?.raw_only_count ?? 0),
+    matched: Number(row?.matched_count ?? 0),
+    scored: Number(row?.scored_count ?? 0),
+    latestCreatedAt: row?.latest_created_at ?? undefined
   };
 }
 

@@ -2,6 +2,7 @@ import Link from "next/link";
 import type React from "react";
 import { EmptyState } from "../../components/empty-state";
 import { ErrorPanel } from "../../components/error-panel";
+import { MetricCard } from "../../components/metric-card";
 import { StatusBadge } from "../../components/status-badge";
 import { getRawLaunchPage } from "../../lib/data";
 import { formatAge, formatDate, formatSol, shortMint } from "../../lib/format";
@@ -44,11 +45,16 @@ export default async function StreamPage({ searchParams }: { searchParams?: Prom
 
       <ErrorPanel message={launches.ok ? undefined : launches.error} />
 
-      <section className="grid grid-cols-4 gap-3 max-[980px]:grid-cols-2 max-[560px]:grid-cols-1">
-        <Metric label="Total launches" value={String(launches.data.total)} />
-        <Metric label="Page" value={`${launches.data.page} / ${launches.data.totalPages}`} />
-        <Metric label="Page size" value={String(launches.data.pageSize)} />
-        <Metric label="Visible rows" value={String(launches.data.items.length)} />
+      <section className="grid grid-cols-5 gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-2 max-[520px]:grid-cols-1">
+        <MetricCard title="Total launches" value={formatCompact(launches.data.stats.total)} detail="Persisted create events" tone="accent" />
+        <MetricCard title="Raw only" value={formatCompact(launches.data.stats.rawOnly)} detail="Not matched or scored" />
+        <MetricCard title="Matched" value={formatCompact(launches.data.stats.matched)} detail="Has meme match" tone="watch" />
+        <MetricCard title="Scored" value={formatCompact(launches.data.stats.scored)} detail="Has score snapshot" tone="good" />
+        <MetricCard
+          title="Latest launch"
+          value={launches.data.stats.latestCreatedAt ? formatAge(launches.data.stats.latestCreatedAt) : "-"}
+          detail={formatDate(launches.data.stats.latestCreatedAt)}
+        />
       </section>
 
       <section className="panel overflow-hidden rounded-md">
@@ -132,15 +138,6 @@ function StreamRow({ launch }: { launch: RawLaunchListItem }) {
         <div className="text-xs text-muted">{formatDate(launch.createdAt)}</div>
       </td>
     </tr>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric-card rounded-md p-4">
-      <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
-      <div className="mt-2 text-xl font-semibold text-ink">{value}</div>
-    </div>
   );
 }
 

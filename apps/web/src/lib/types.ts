@@ -122,11 +122,20 @@ export interface RawLaunchListItem {
 export interface RawLaunchPage {
   items: RawLaunchListItem[];
   total: number;
+  stats: RawLaunchStats;
   page: number;
   pageSize: number;
   totalPages: number;
   hasPrevious: boolean;
   hasNext: boolean;
+}
+
+export interface RawLaunchStats {
+  total: number;
+  rawOnly: number;
+  matched: number;
+  scored: number;
+  latestCreatedAt?: Date;
 }
 
 export interface PositionListItem {
