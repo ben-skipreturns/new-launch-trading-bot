@@ -16,8 +16,10 @@
     "lint": "npm run check",
     "migrate": "node --import tsx apps/bot/src/index.ts migrate",
     "meme-report": "node --import tsx apps/bot/src/index.ts meme-report",
+    "match:token": "node --import tsx apps/bot/src/index.ts match-token",
     "replay:fixture": "node --import tsx apps/bot/src/index.ts replay --fixture fixtures/pumpapi-events.jsonl --report reports/replay.md",
     "retention:dry-run": "node --import tsx apps/bot/src/index.ts retention-prune --dry-run",
+    "stream:test": "node --import tsx apps/bot/src/index.ts stream-test",
     "web:build": "npm run build --workspace @moonshot/web",
     "web:dev": "npm run dev --workspace @moonshot/web",
     "test": "vitest run"

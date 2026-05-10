@@ -32,6 +32,7 @@ const envLines = [
   "OPENAI_TREND_MAX_TOPICS=20",
   "OPENAI_TREND_MAX_TOOL_CALLS=2",
   "OPENAI_TREND_MAX_OUTPUT_TOKENS=12000",
+  "PUMPAPI_STREAM_URL=wss://stream.pumpapi.io/",
   "NEXT_PUBLIC_REFRESH_SECONDS=30"
 ];
 
@@ -43,6 +44,20 @@ const liveTrendLoop = [
 ];
 
 const fixtureLoop = ["docker compose up -d db", "npm run migrate", "npm run replay:fixture", "npm run web:dev"];
+
+const launchStreamLoop = [
+  "npm run stream:test -- --source fixture --max-launches 10",
+  "npm run stream:test -- --source fixture --max-launches 10 --persist",
+  "npm run stream:test -- --source pumpapi --duration-seconds 60 --max-launches 10",
+  "npm run stream:test -- --source pumpapi --duration-seconds 60 --max-launches 10 --persist"
+];
+
+const tokenMatchLoop = [
+  'npm run match:token -- --fixture-topics --name "Moo Deng" --symbol MOODENG',
+  "npm run start --workspace @moonshot/bot -- trend-refresh",
+  'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>"',
+  'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>" --persist'
+];
 
 const resetLoop = [
   "docker compose down -v",
@@ -75,6 +90,16 @@ const inspectCommands = [
     label: "Active topic sample",
     command:
       'docker compose exec db psql -U moonshot -d moonshot -c "select canonical_phrase, topic_type, velocity_score, novelty_score, source_coverage, last_seen from trend_topics order by last_seen desc limit 10;"'
+  },
+  {
+    label: "Latest launches",
+    command:
+      'docker compose exec db psql -U moonshot -d moonshot -c "select mint, name, symbol, source, created_at from token_launches order by created_at desc limit 10;"'
+  },
+  {
+    label: "Latest token matches",
+    command:
+      'docker compose exec db psql -U moonshot -d moonshot -c "select mint, canonical_phrase, meme_relevance_score, reject_flags, observed_at from token_meme_matches order by observed_at desc limit 10;"'
   }
 ];
 
@@ -92,8 +117,20 @@ const troubleshooting = [
     fix: "Run npm run replay:fixture. npm run demo only uses memory and writes reports/demo.md."
   },
   {
+    issue: "stream-test sees no live launches",
+    fix: "Increase --duration-seconds or verify PUMPAPI_STREAM_URL. The stream-test command does not call OpenAI, enrichment, scoring, or paper trading."
+  },
+  {
     issue: "trend-refresh stores 0 topics",
     fix: "Check the latest trend_refresh_runs row. If status is error, read error_text. If status is skipped_duplicate, that 15-minute window already has a successful run."
+  },
+  {
+    issue: "match-token returns NO_MATCHABLE_TOPICS",
+    fix: "The active radar topics were too weak or risky for matching. Inspect Radar Review, run another trend-refresh later, or use --fixture-topics to test matcher mechanics."
+  },
+  {
+    issue: "match-token says DATABASE_URL is required",
+    fix: "Use --fixture-topics for a no-database matcher check, or make sure DATABASE_URL is set in the repo-root .env before matching against live radar topics."
   },
   {
     issue: "OpenAI response is incomplete because of max_output_tokens",
@@ -172,6 +209,36 @@ export default function LocalLoopPage() {
       </section>
 
       <section className="panel rounded-md p-5">
+        <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-5 max-[980px]:grid-cols-1">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Launch stream loop</h2>
+            <p className="mt-3 text-sm leading-6 text-muted">
+              Use this before token matching. It verifies the raw launch feed shape by printing token create events and optionally storing only raw create events plus token_launches.
+            </p>
+            <p className="mt-3 text-sm leading-6 text-muted">
+              This command intentionally skips OpenAI trend refresh, enrichment, matching, scoring, and paper trading.
+            </p>
+          </div>
+          <PreBlock lines={launchStreamLoop} />
+        </div>
+      </section>
+
+      <section className="panel rounded-md p-5">
+        <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-5 max-[980px]:grid-cols-1">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Token matching loop</h2>
+            <p className="mt-3 text-sm leading-6 text-muted">
+              Use this before live ingestion. The fixture command proves the matcher mechanics without OpenAI or Postgres writes. The live-topic command checks a proposed token against the current radar topics already stored in your local database.
+            </p>
+            <p className="mt-3 text-sm leading-6 text-muted">
+              Add --persist only when you want the local test match to appear in database inspection queries and command-center pages.
+            </p>
+          </div>
+          <PreBlock lines={tokenMatchLoop} />
+        </div>
+      </section>
+
+      <section className="panel rounded-md p-5">
         <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Inspect data</h2>
         <div className="mt-4 grid grid-cols-2 gap-4 max-[1120px]:grid-cols-1">
           {inspectCommands.map((item) => (
@@ -201,6 +268,8 @@ export default function LocalLoopPage() {
                 <CommandRow command="npm run demo" writes="No" purpose="Runs the pipeline in memory and writes reports/demo.md." />
                 <CommandRow command="npm run replay:fixture" writes="Yes" purpose="Replays fixtures into Postgres and writes reports/replay.md." />
                 <CommandRow command="npm run start --workspace @moonshot/bot -- trend-refresh" writes="Yes" purpose="Runs the OpenAI meme radar and writes topics, observations, and refresh audit rows." />
+                <CommandRow command="npm run stream:test -- --source pumpapi" writes="Optional" purpose="Prints live token create events; add --persist to store only raw creates and token launches." />
+                <CommandRow command={'npm run match:token -- --name "..." --symbol "..."'} writes="Optional" purpose="Tests token text against active or fixture topics; add --persist to store the local match." />
                 <CommandRow command="npm run migrate" writes="Yes" purpose="Applies SQL schema migrations to the configured database." />
                 <CommandRow command="npm run web:dev" writes="No" purpose="Starts the read-only Next.js command center." />
                 <CommandRow command="npm run check" writes="No" purpose="Runs TypeScript checks across workspaces." />

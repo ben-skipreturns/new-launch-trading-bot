@@ -29,6 +29,7 @@ import {
   type LaunchFeed,
   type Store,
   type TokenEnrichment,
+  type TokenLaunch,
   type TrendObservation,
   type TrendSource
 } from "@moonshot/core";
@@ -106,6 +107,32 @@ program
   });
 
 program
+  .command("stream-test")
+  .description("Inspect token create events from a fixture or PumpApi stream without matching, scoring, or paper trading.")
+  .option("--source <source>", "fixture or pumpapi", "fixture")
+  .option("--fixture <path>", "JSONL fixture path", "fixtures/pumpapi-events.jsonl")
+  .option("--duration-seconds <seconds>", "Stop stream testing after this many seconds", "60")
+  .option("--max-launches <count>", "Stop after this many create events", "25")
+  .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
+  .option("--persist", "Persist only raw create events and token_launches", false)
+  .action(async (options: StreamTestOptions) => {
+    if (options.persist && !options.databaseUrl) throw new Error("DATABASE_URL is required when using --persist.");
+    const store = options.persist ? createStore(options.databaseUrl) : undefined;
+    try {
+      const result = await runLaunchStreamTest(createLaunchFeed(options.source, options.fixture), {
+        durationMs: parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000,
+        maxLaunches: parsePositiveIntegerOption(options.maxLaunches, "--max-launches"),
+        store
+      });
+      console.log(
+        `Stream test complete: ${result.events} events read, ${result.launches} launches, ${result.ignoredEvents} non-create events ignored, ${result.persistedLaunches} launches persisted.`
+      );
+    } finally {
+      if (store) await closeStore(store);
+    }
+  });
+
+program
   .command("trend-refresh")
   .description("Run the OpenAI meme trend radar and store active meme/current-event topics.")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
@@ -116,6 +143,57 @@ program
       const result = await refreshTrends(store, options.fixture ? fixtureTrendSources() : liveTrendSources(store));
       console.log(`Stored ${result.observations.length} trend observations and ${result.topics.length} topics.`);
       if (!options.fixture) await printLatestTrendRefreshRun(store);
+    } finally {
+      await closeStore(store);
+    }
+  });
+
+program
+  .command("match-token")
+  .description("Run token meme matching locally against active DB topics or deterministic fixture topics.")
+  .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
+  .option("--name <name>", "Token name to test")
+  .option("--symbol <symbol>", "Token symbol to test")
+  .option("--uri <uri>", "Token metadata URI or text to include in matching")
+  .option("--mint <mint>", "Mint identifier to use for optional persistence")
+  .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
+  .option("--persist", "Persist the local token launch and meme match to the configured database", false)
+  .option("--min-score <score>", "Meme relevance threshold", "0.7")
+  .action(async (options: MatchTokenOptions) => {
+    if (![options.name, options.symbol, options.uri].some((value) => value && value.trim().length > 0)) {
+      throw new Error("Provide at least one of --name, --symbol, or --uri.");
+    }
+    if (!options.fixtureTopics && !options.databaseUrl) {
+      throw new Error("DATABASE_URL is required unless --fixture-topics is used.");
+    }
+    if (options.persist && !options.databaseUrl) {
+      throw new Error("DATABASE_URL is required when using --persist.");
+    }
+
+    const minScore = parseNumberOption(options.minScore, "--min-score");
+    const store = options.fixtureTopics && !options.persist ? new MemoryStore() : createStore(options.databaseUrl);
+    try {
+      if (options.fixtureTopics) await refreshTrends(store, fixtureTrendSources());
+
+      const observedAt = new Date();
+      const activeSince = new Date(observedAt.getTime() - 48 * 60 * 60 * 1000);
+      const topics = await store.listTrendTopics(activeSince, 500);
+      const launch = buildLocalTokenLaunch(options, observedAt);
+      const match = await new TokenMemeMatcher({ minScore }).match({ launch, topics, observedAt });
+
+      if (options.persist) {
+        await store.upsertTokenLaunch(launch);
+        await store.upsertTokenMemeMatch(match);
+      }
+
+      printTokenMatchResult({
+        source: options.fixtureTopics ? "fixture topics" : "active database topics",
+        topicsLoaded: topics.length,
+        minScore,
+        persisted: options.persist,
+        launch,
+        match
+      });
     } finally {
       await closeStore(store);
     }
@@ -211,6 +289,151 @@ program.parseAsync().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });
+
+interface MatchTokenOptions {
+  databaseUrl?: string;
+  name?: string;
+  symbol?: string;
+  uri?: string;
+  mint?: string;
+  fixtureTopics: boolean;
+  persist: boolean;
+  minScore: string;
+}
+
+interface StreamTestOptions {
+  source: string;
+  fixture: string;
+  durationSeconds: string;
+  maxLaunches: string;
+  databaseUrl?: string;
+  persist: boolean;
+}
+
+async function runLaunchStreamTest(
+  feed: LaunchFeed,
+  options: { durationMs: number; maxLaunches: number; store?: Store }
+): Promise<{ events: number; launches: number; ignoredEvents: number; persistedLaunches: number }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.durationMs);
+  let events = 0;
+  let launches = 0;
+  let ignoredEvents = 0;
+  let persistedLaunches = 0;
+
+  try {
+    for await (const event of feed.stream(controller.signal)) {
+      events += 1;
+      if (!event.tokenLaunch) {
+        ignoredEvents += 1;
+        continue;
+      }
+
+      launches += 1;
+      printLaunchEvent(event.tokenLaunch);
+      if (options.store) {
+        await options.store.upsertRawEvent(event);
+        await options.store.upsertTokenLaunch(event.tokenLaunch);
+        persistedLaunches += 1;
+      }
+      if (launches >= options.maxLaunches) {
+        controller.abort();
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  return { events, launches, ignoredEvents, persistedLaunches };
+}
+
+function createLaunchFeed(source: string, fixturePath: string): LaunchFeed {
+  if (source === "fixture") return new JsonlLaunchFeed(fixturePath);
+  if (source === "pumpapi") return new PumpApiLaunchFeed();
+  throw new Error(`Unsupported stream-test source "${source}". Use fixture or pumpapi.`);
+}
+
+function printLaunchEvent(launch: TokenLaunch): void {
+  console.log(
+    [
+      `[launch ${launch.createdAt.toISOString()}]`,
+      launch.name ?? "-",
+      `(${launch.symbol ?? "-"})`,
+      `mint=${launch.mint}`,
+      `creator=${launch.creator ?? "-"}`,
+      `pool=${launch.pool}`,
+      `uri=${launch.uri ?? "-"}`
+    ].join(" ")
+  );
+}
+
+function buildLocalTokenLaunch(options: MatchTokenOptions, observedAt: Date): TokenLaunch {
+  const mint = options.mint?.trim() || `local-${slugify([options.symbol, options.name, options.uri].filter(Boolean).join("-")) || "token"}`;
+  return {
+    mint,
+    source: "local-token-match",
+    signature: `local-token-match:${mint}:${observedAt.getTime()}`,
+    pool: "local",
+    name: options.name?.trim(),
+    symbol: options.symbol?.trim(),
+    uri: options.uri?.trim(),
+    createdAt: observedAt,
+    raw: {
+      mode: "local-token-match",
+      fixtureTopics: options.fixtureTopics
+    }
+  };
+}
+
+function printTokenMatchResult(input: {
+  source: string;
+  topicsLoaded: number;
+  minScore: number;
+  persisted: boolean;
+  launch: TokenLaunch;
+  match: Awaited<ReturnType<TokenMemeMatcher["match"]>>;
+}): void {
+  const status = input.match.rejectFlags.length === 0 ? "pass" : "reject";
+  console.log(`Token: ${input.launch.name ?? "-"} (${input.launch.symbol ?? "-"})`);
+  console.log(`Topic source: ${input.source}`);
+  console.log(`Topics loaded: ${input.topicsLoaded}`);
+  console.log(`Meme relevance: ${input.match.memeRelevanceScore.toFixed(3)} / threshold ${input.minScore.toFixed(3)} -> ${status}`);
+  console.log(`Matched topic: ${input.match.canonicalPhrase ?? "none"}${input.match.topicType ? ` (${input.match.topicType})` : ""}`);
+  console.log(`Reasons: ${input.match.reasons.length > 0 ? input.match.reasons.join(", ") : "none"}`);
+  console.log(`Reject flags: ${input.match.rejectFlags.length > 0 ? input.match.rejectFlags.join(", ") : "none"}`);
+  console.log(`Evidence: ${input.match.evidenceUrls.length > 0 ? input.match.evidenceUrls.join(", ") : "none"}`);
+  console.log(`Persisted: ${input.persisted ? "yes" : "no"}`);
+  if (input.topicsLoaded === 0) {
+    console.log("No active topics were available. Run trend-refresh first or use --fixture-topics for a deterministic local check.");
+  }
+}
+
+function parseNumberOption(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`${name} must be a finite number.`);
+  return parsed;
+}
+
+function parsePositiveNumberOption(value: string, name: string): number {
+  const parsed = parseNumberOption(value, name);
+  if (parsed <= 0) throw new Error(`${name} must be greater than 0.`);
+  return parsed;
+}
+
+function parsePositiveIntegerOption(value: string, name: string): number {
+  const parsed = parsePositiveNumberOption(value, name);
+  if (!Number.isInteger(parsed)) throw new Error(`${name} must be an integer.`);
+  return parsed;
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
 
 async function runReplay(fixturePath: string, store: Store, enricher: Enricher) {
   const feed = new JsonlLaunchFeed(fixturePath);
