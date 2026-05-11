@@ -129,21 +129,21 @@ program
   .action(async (options: StreamTestOptions) => {
     if (options.persist && !options.databaseUrl) throw new Error("DATABASE_URL is required when using --persist.");
     const store = options.persist ? createStore(options.databaseUrl) : undefined;
-    const health = store ? createStreamHealthRun(options.source) : undefined;
+    const health = createStreamHealthRun(options.source);
     try {
-      if (store && health) await store.upsertStreamHealthRun(health);
+      if (store) await store.upsertStreamHealthRun(health);
       const result = await runLaunchStreamTest(createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)), {
         durationMs: parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000,
         maxLaunches: parsePositiveIntegerOption(options.maxLaunches, "--max-launches"),
         store,
         health
       });
-      if (store && health) await finishStreamHealthRun(store, health, "completed");
+      await finishStreamHealthRun(store, health, "completed");
       console.log(
-        `Stream test complete: ${result.events} events read, ${result.launches} launches, ${result.ignoredEvents} non-create events ignored, ${result.persistedLaunches} launches persisted, ${result.duplicateLaunches} duplicates.`
+        `Stream test complete: ${result.events} events read, ${result.launches} launches, ${result.ignoredEvents} non-create events ignored, ${result.persistedLaunches} launches persisted, ${result.duplicateLaunches} duplicates, ${health?.parserRejects ?? 0} parser rejects, ${formatRate(health?.launchesPerMinute)} launches/min.`
       );
     } catch (error) {
-      if (store && health) await finishStreamHealthRun(store, health, "error", error);
+      await finishStreamHealthRun(store, health, "error", error);
       throw error;
     } finally {
       if (store) await closeStore(store);
@@ -319,7 +319,7 @@ program
       const result = await runMatchStream(createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)), store, options, health);
       if (health) await finishStreamHealthRun(store, health, "completed");
       console.log(
-        `Match stream complete: ${result.events} events read, ${result.launches} launches, ${result.matched} matched (${result.passed} pass, ${result.rejected} reject), ${result.persisted} persisted, ${result.duplicateLaunches} duplicates.`
+        `Match stream complete: ${result.events} events read, ${result.launches} launches, ${result.matched} matched (${result.passed} pass, ${result.rejected} reject), ${result.persisted} persisted, ${result.duplicateLaunches} duplicates, ${health?.parserRejects ?? 0} parser rejects, ${formatRate(health?.launchesPerMinute)} launches/min.`
       );
     } catch (error) {
       if (health) await finishStreamHealthRun(store, health, "error", error);
@@ -520,7 +520,7 @@ function streamFeedOptions(
   return {
     staleTimeoutMs: parsePositiveNumberOption(options.staleTimeoutSeconds, "--stale-timeout-seconds") * 1000,
     maxReconnects: parsePositiveIntegerOption(options.maxReconnects, "--max-reconnects"),
-    onStatus: health && store ? createStreamStatusHandler(store, health) : undefined
+    onStatus: health ? createStreamStatusHandler(store, health) : undefined
   };
 }
 
@@ -534,13 +534,18 @@ function createStreamHealthRun(source: string): StreamHealthRun {
     eventsRead: 0,
     launchesRead: 0,
     duplicateLaunches: 0,
+    parserRejects: 0,
     reconnects: 0,
     staleWarnings: 0,
+    eventsPerMinute: 0,
+    launchesPerMinute: 0,
+    duplicateRate: 0,
+    parserRejectRate: 0,
     raw: { statusEvents: [] }
   };
 }
 
-function createStreamStatusHandler(store: Store, health: StreamHealthRun): (event: PumpApiStreamStatusEvent) => void {
+function createStreamStatusHandler(store: Store | undefined, health: StreamHealthRun): (event: PumpApiStreamStatusEvent) => void {
   return (event) => {
     if (event.type === "connected") {
       health.connectedAt ??= event.at;
@@ -548,6 +553,10 @@ function createStreamStatusHandler(store: Store, health: StreamHealthRun): (even
     }
     if (event.type === "disconnected") health.disconnectedAt = event.at;
     if (event.type === "reconnecting") health.reconnects += 1;
+    if (event.type === "parser_reject") {
+      health.parserRejects += 1;
+      appendParserRejectSample(health, event);
+    }
     if (event.type === "stale") {
       health.staleWarnings += 1;
       health.status = "stale";
@@ -557,8 +566,9 @@ function createStreamStatusHandler(store: Store, health: StreamHealthRun): (even
       health.status = "error";
     }
     if (event.lastEventAt) health.lastEventAt = event.lastEventAt;
+    updateStreamHealthMetrics(health);
     appendStreamRawStatus(health, event);
-    void store.upsertStreamHealthRun(health).catch(() => undefined);
+    if (store) void store.upsertStreamHealthRun(health).catch(() => undefined);
   };
 }
 
@@ -568,19 +578,21 @@ async function recordStreamHealthEvent(
   event: LaunchEvent,
   duplicateLaunch: boolean
 ): Promise<void> {
-  if (!store || !health) return;
+  if (!health) return;
   health.eventsRead += 1;
   health.lastEventAt = event.timestamp;
   if (event.tokenLaunch) {
     health.launchesRead += 1;
     if (duplicateLaunch) health.duplicateLaunches += 1;
+    appendAcceptedCreateSample(health, event);
   }
   if (health.status === "stale" || health.status === "error") health.status = "running";
-  await store.upsertStreamHealthRun(health);
+  updateStreamHealthMetrics(health);
+  if (store) await store.upsertStreamHealthRun(health);
 }
 
 async function finishStreamHealthRun(
-  store: Store,
+  store: Store | undefined,
   health: StreamHealthRun,
   status: Exclude<StreamHealthStatus, "running" | "stale">,
   error?: unknown
@@ -588,7 +600,8 @@ async function finishStreamHealthRun(
   health.status = status;
   health.disconnectedAt = new Date();
   if (error) health.errorText = error instanceof Error ? error.message : String(error);
-  await store.upsertStreamHealthRun(health);
+  updateStreamHealthMetrics(health);
+  if (store) await store.upsertStreamHealthRun(health);
 }
 
 async function isDuplicateLaunch(store: Store | undefined, seenLaunches: Set<string>, launch: TokenLaunch): Promise<boolean> {
@@ -610,10 +623,75 @@ function appendStreamRawStatus(health: StreamHealthRun, event: PumpApiStreamStat
   if (event.delayMs !== undefined) nextEvent.delayMs = event.delayMs;
   if (event.lastEventAt) nextEvent.lastEventAt = event.lastEventAt.toISOString();
   if (event.errorText) nextEvent.errorText = event.errorText;
+  if (event.parserRejectReason) nextEvent.parserRejectReason = event.parserRejectReason;
   health.raw = {
     ...raw,
     statusEvents: [...existing.slice(-24), nextEvent]
   };
+}
+
+function appendAcceptedCreateSample(health: StreamHealthRun, event: LaunchEvent): void {
+  if (!event.tokenLaunch) return;
+  appendStreamSample(health, "acceptedCreateSamples", {
+    at: new Date().toISOString(),
+    signature: event.signature,
+    mint: event.tokenLaunch.mint,
+    name: event.tokenLaunch.name ?? null,
+    symbol: event.tokenLaunch.symbol ?? null,
+    payload: compactJsonValue(event.raw)
+  });
+}
+
+function appendParserRejectSample(health: StreamHealthRun, event: PumpApiStreamStatusEvent): void {
+  appendStreamSample(health, "parserRejectSamples", {
+    at: event.at.toISOString(),
+    reason: event.parserRejectReason ?? "unknown",
+    errorText: event.errorText ?? null,
+    payload: event.payload ? compactJsonValue(event.payload) : null,
+    payloadText: event.payloadText ?? null
+  });
+}
+
+function appendStreamSample(health: StreamHealthRun, key: "acceptedCreateSamples" | "parserRejectSamples", sample: Record<string, JsonValue>): void {
+  const raw = isJsonRecord(health.raw) ? health.raw : {};
+  const existing = Array.isArray(raw[key]) ? raw[key] : [];
+  health.raw = {
+    ...raw,
+    [key]: [...existing.slice(-9), sample]
+  };
+}
+
+function updateStreamHealthMetrics(health: StreamHealthRun): void {
+  const elapsedMinutes = Math.max((Date.now() - health.startedAt.getTime()) / 60_000, 1 / 60);
+  const totalProviderMessages = health.eventsRead + health.parserRejects;
+  health.eventsPerMinute = roundMetric(health.eventsRead / elapsedMinutes);
+  health.launchesPerMinute = roundMetric(health.launchesRead / elapsedMinutes);
+  health.duplicateRate = roundMetric(health.launchesRead > 0 ? health.duplicateLaunches / health.launchesRead : 0);
+  health.parserRejectRate = roundMetric(totalProviderMessages > 0 ? health.parserRejects / totalProviderMessages : 0);
+  const raw = isJsonRecord(health.raw) ? health.raw : {};
+  health.raw = {
+    ...raw,
+    metrics: {
+      eventsPerMinute: health.eventsPerMinute,
+      launchesPerMinute: health.launchesPerMinute,
+      duplicateRate: health.duplicateRate,
+      parserRejectRate: health.parserRejectRate
+    }
+  };
+}
+
+function roundMetric(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 1000) / 1000;
+}
+
+function compactJsonValue(value: JsonValue, depth = 0): JsonValue {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return value.length <= 500 ? value : `${value.slice(0, 500)}...`;
+  if (Array.isArray(value)) return depth >= 3 ? `[${value.length} items]` : value.slice(0, 20).map((item) => compactJsonValue(item, depth + 1));
+  const out: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value).slice(0, 40)) out[key] = compactJsonValue(item, depth + 1);
+  return out;
 }
 
 function isJsonRecord(value: JsonValue): value is Record<string, JsonValue> {
@@ -923,6 +1001,11 @@ function parsePositiveIntegerOption(value: string, name: string): number {
   const parsed = parsePositiveNumberOption(value, name);
   if (!Number.isInteger(parsed)) throw new Error(`${name} must be an integer.`);
   return parsed;
+}
+
+function formatRate(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return "0.000";
+  return value.toFixed(3);
 }
 
 function slugify(value: string): string {

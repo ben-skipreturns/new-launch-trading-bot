@@ -214,8 +214,13 @@ interface StreamHealthRunsTable {
   events_read: number;
   launches_read: number;
   duplicate_launches: number;
+  parser_rejects: number;
   reconnects: number;
   stale_warnings: number;
+  events_per_minute: string;
+  launches_per_minute: string;
+  duplicate_rate: string;
+  parser_reject_rate: string;
   error_text: string | null;
   raw: JsonValue;
 }
@@ -586,8 +591,13 @@ export class PostgresStore implements Store {
         events_read: run.eventsRead,
         launches_read: run.launchesRead,
         duplicate_launches: run.duplicateLaunches,
+        parser_rejects: run.parserRejects,
         reconnects: run.reconnects,
         stale_warnings: run.staleWarnings,
+        events_per_minute: String(run.eventsPerMinute),
+        launches_per_minute: String(run.launchesPerMinute),
+        duplicate_rate: String(run.duplicateRate),
+        parser_reject_rate: String(run.parserRejectRate),
         error_text: run.errorText ?? null,
         raw: run.raw
       })
@@ -600,8 +610,13 @@ export class PostgresStore implements Store {
           events_read: run.eventsRead,
           launches_read: run.launchesRead,
           duplicate_launches: run.duplicateLaunches,
+          parser_rejects: run.parserRejects,
           reconnects: run.reconnects,
           stale_warnings: run.staleWarnings,
+          events_per_minute: String(run.eventsPerMinute),
+          launches_per_minute: String(run.launchesPerMinute),
+          duplicate_rate: String(run.duplicateRate),
+          parser_reject_rate: String(run.parserRejectRate),
           error_text: run.errorText ?? null,
           raw: run.raw
         })
@@ -989,8 +1004,13 @@ function streamHealthRunFromRow(row: Selectable<StreamHealthRunsTable>): StreamH
     eventsRead: row.events_read,
     launchesRead: row.launches_read,
     duplicateLaunches: row.duplicate_launches,
+    parserRejects: row.parser_rejects,
     reconnects: row.reconnects,
     staleWarnings: row.stale_warnings,
+    eventsPerMinute: Number(row.events_per_minute),
+    launchesPerMinute: Number(row.launches_per_minute),
+    duplicateRate: Number(row.duplicate_rate),
+    parserRejectRate: Number(row.parser_reject_rate),
     errorText: row.error_text ?? undefined,
     raw: row.raw
   };

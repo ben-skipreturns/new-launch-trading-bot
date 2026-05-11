@@ -241,7 +241,11 @@ function StreamHealthCard({ run }: { run: StreamHealthListItem }) {
       <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
         <HealthMetric label="Events" value={formatCompact(run.eventsRead)} />
         <HealthMetric label="Launches" value={formatCompact(run.launchesRead)} />
-        <HealthMetric label="Dupes" value={formatCompact(run.duplicateLaunches)} />
+        <HealthMetric label="Launch/min" value={formatNumber(run.launchesPerMinute, 2)} />
+        <HealthMetric label="Event/min" value={formatNumber(run.eventsPerMinute, 2)} />
+        <HealthMetric label="Parser rejects" value={formatCompact(run.parserRejects)} />
+        <HealthMetric label="Reject rate" value={formatPercent(run.parserRejectRate)} />
+        <HealthMetric label="Dupes" value={formatPercent(run.duplicateRate)} />
         <HealthMetric label="Reconnects" value={formatCompact(run.reconnects)} />
       </div>
       <div className="mt-3 text-xs text-muted">Last event {run.lastEventAt ? formatAge(run.lastEventAt) : "-"}</div>
@@ -302,6 +306,16 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 function formatCompact(value: number | undefined): string {
   if (value === undefined || Number.isNaN(value)) return "-";
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2, notation: "compact" }).format(value);
+}
+
+function formatNumber(value: number | undefined, maximumFractionDigits = 2): string {
+  if (value === undefined || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(value);
+}
+
+function formatPercent(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return "-";
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, style: "percent" }).format(value);
 }
 
 function formatUri(uri: string | undefined) {

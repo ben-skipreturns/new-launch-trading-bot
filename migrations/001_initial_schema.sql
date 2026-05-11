@@ -192,11 +192,22 @@ create table if not exists stream_health_runs (
   events_read integer not null default 0,
   launches_read integer not null default 0,
   duplicate_launches integer not null default 0,
+  parser_rejects integer not null default 0,
   reconnects integer not null default 0,
   stale_warnings integer not null default 0,
+  events_per_minute numeric not null default 0,
+  launches_per_minute numeric not null default 0,
+  duplicate_rate numeric not null default 0,
+  parser_reject_rate numeric not null default 0,
   error_text text,
   raw jsonb not null default '{}'::jsonb
 );
+
+alter table stream_health_runs add column if not exists parser_rejects integer not null default 0;
+alter table stream_health_runs add column if not exists events_per_minute numeric not null default 0;
+alter table stream_health_runs add column if not exists launches_per_minute numeric not null default 0;
+alter table stream_health_runs add column if not exists duplicate_rate numeric not null default 0;
+alter table stream_health_runs add column if not exists parser_reject_rate numeric not null default 0;
 
 create table if not exists token_meme_matches (
   mint text not null references token_launches(mint) on delete cascade,

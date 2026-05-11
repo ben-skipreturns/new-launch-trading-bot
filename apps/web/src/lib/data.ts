@@ -690,8 +690,13 @@ interface StreamHealthRow {
   events_read: number;
   launches_read: number;
   duplicate_launches: number;
+  parser_rejects: number;
   reconnects: number;
   stale_warnings: number;
+  events_per_minute: string;
+  launches_per_minute: string;
+  duplicate_rate: string;
+  parser_reject_rate: string;
   error_text: string | null;
 }
 
@@ -886,8 +891,13 @@ function streamHealthFromRow(row: StreamHealthRow): StreamHealthListItem {
     eventsRead: row.events_read,
     launchesRead: row.launches_read,
     duplicateLaunches: row.duplicate_launches,
+    parserRejects: row.parser_rejects,
     reconnects: row.reconnects,
     staleWarnings: row.stale_warnings,
+    eventsPerMinute: Number(row.events_per_minute),
+    launchesPerMinute: Number(row.launches_per_minute),
+    duplicateRate: Number(row.duplicate_rate),
+    parserRejectRate: Number(row.parser_reject_rate),
     errorText: row.error_text ?? undefined
   };
 }

@@ -256,8 +256,13 @@ export interface StreamHealthRun {
   eventsRead: number;
   launchesRead: number;
   duplicateLaunches: number;
+  parserRejects: number;
   reconnects: number;
   staleWarnings: number;
+  eventsPerMinute: number;
+  launchesPerMinute: number;
+  duplicateRate: number;
+  parserRejectRate: number;
   errorText?: string;
   raw: JsonValue;
 }

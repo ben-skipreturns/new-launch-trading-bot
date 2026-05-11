@@ -1,9 +1,9 @@
 import WebSocket from "ws";
 import type { LaunchFeed } from "../domain/interfaces.js";
-import type { LaunchEvent } from "../domain/types.js";
+import type { JsonValue, LaunchEvent } from "../domain/types.js";
 import { normalizePumpApiEvent } from "../normalizers/pumpApi.js";
 
-export type PumpApiStreamStatusType = "connected" | "disconnected" | "reconnecting" | "stale" | "error";
+export type PumpApiStreamStatusType = "connected" | "disconnected" | "reconnecting" | "stale" | "error" | "parser_reject";
 
 export interface PumpApiStreamStatusEvent {
   type: PumpApiStreamStatusType;
@@ -12,6 +12,9 @@ export interface PumpApiStreamStatusEvent {
   delayMs?: number;
   lastEventAt?: Date;
   errorText?: string;
+  parserRejectReason?: string;
+  payload?: JsonValue;
+  payloadText?: string;
 }
 
 export interface PumpApiLaunchFeedOptions {
@@ -22,6 +25,16 @@ export interface PumpApiLaunchFeedOptions {
   maxReconnectDelayMs?: number;
   staleTimeoutMs?: number;
   onStatus?: (event: PumpApiStreamStatusEvent) => void;
+}
+
+export interface PumpApiParsedMessage {
+  event?: LaunchEvent;
+  reject?: {
+    reason: string;
+    errorText?: string;
+    payload?: JsonValue;
+    payloadText?: string;
+  };
 }
 
 interface QueueItem {
@@ -83,19 +96,24 @@ export class PumpApiLaunchFeed implements LaunchFeed {
         });
         socket.on("message", (data) => {
           lastMessageReceivedAt = Date.now();
-          try {
-            const parsed = JSON.parse(data.toString());
-            const event = normalizePumpApiEvent(parsed);
-            if (event) {
-              lastEventAt = event.timestamp;
-              queue.push({ event });
-            }
-          } catch (cause) {
-            const error = cause instanceof Error ? cause : new Error(String(cause));
-            this.emitStatus({ type: "error", at: new Date(), attempt, errorText: error.message, lastEventAt });
-          } finally {
-            notify();
+          const payloadText = data.toString();
+          const parsed = parsePumpApiMessage(payloadText);
+          if (parsed.event) {
+            lastEventAt = parsed.event.timestamp;
+            queue.push({ event: parsed.event });
+          } else if (parsed.reject) {
+            this.emitStatus({
+              type: "parser_reject",
+              at: new Date(),
+              attempt,
+              parserRejectReason: parsed.reject.reason,
+              errorText: parsed.reject.errorText,
+              payload: parsed.reject.payload,
+              payloadText: parsed.reject.payloadText,
+              lastEventAt
+            });
           }
+          notify();
         });
         socket.on("error", (cause) => {
           latestSocketError = cause instanceof Error ? cause : new Error(String(cause));
@@ -160,6 +178,29 @@ export class PumpApiLaunchFeed implements LaunchFeed {
   }
 }
 
+export function parsePumpApiMessage(payloadText: string): PumpApiParsedMessage {
+  try {
+    const parsed = JSON.parse(payloadText);
+    const event = normalizePumpApiEvent(parsed);
+    if (event) return { event };
+    return {
+      reject: {
+        reason: "unsupported_or_invalid_payload",
+        payload: toJsonValue(parsed)
+      }
+    };
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    return {
+      reject: {
+        reason: "invalid_json",
+        errorText: error.message,
+        payloadText: truncateText(payloadText, 800)
+      }
+    };
+  }
+}
+
 async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (delayMs <= 0 || signal?.aborted) return;
   await new Promise<void>((resolve) => {
@@ -173,4 +214,20 @@ async function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
       { once: true }
     );
   });
+}
+
+function toJsonValue(value: unknown): JsonValue {
+  if (value === null) return null;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(toJsonValue);
+  if (typeof value === "object") {
+    const out: Record<string, JsonValue> = {};
+    for (const [key, item] of Object.entries(value)) out[key] = toJsonValue(item);
+    return out;
+  }
+  return String(value);
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
