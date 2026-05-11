@@ -54,7 +54,21 @@ export interface MemeMatchInput {
   launch: TokenLaunch;
   topics: TrendTopic[];
   enrichment?: TokenEnrichment | null;
+  saturation?: MemeMatchSaturationContext;
   observedAt: Date;
+}
+
+export interface MemeMatchSaturationContext {
+  recentWindowMs: number;
+  topics: MemeMatchTopicSaturation[];
+}
+
+export interface MemeMatchTopicSaturation {
+  topicId?: string;
+  canonicalPhrase?: string;
+  matchCount: number;
+  sameSymbolCount: number;
+  sameNameCount: number;
 }
 
 export interface ExecutionAdapter {

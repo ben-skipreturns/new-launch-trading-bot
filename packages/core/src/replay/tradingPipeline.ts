@@ -1,5 +1,6 @@
 import type { Enricher, FeatureExtractor, MemeMatcher, PaperBroker, Scorer } from "../domain/interfaces.js";
 import type { LaunchEvent, ScoreSnapshot } from "../domain/types.js";
+import { buildMemeMatchSaturationContext } from "../meme/matchSaturation.js";
 import type { Store } from "../storage/store.js";
 
 export interface TradingPipelineOptions {
@@ -34,10 +35,12 @@ export class TradingPipeline {
       if (enrichment) await this.store.upsertTokenEnrichment(enrichment);
       if (this.memeMatcher) {
         const topics = await this.store.listTrendTopics(new Date(event.timestamp.getTime() - this.activeTrendWindowMs), 500);
+        const saturation = await buildMemeMatchSaturationContext(this.store, event.tokenLaunch, event.timestamp);
         const memeMatch = await this.memeMatcher.match({
           launch: event.tokenLaunch,
           topics,
           enrichment,
+          saturation,
           observedAt: event.timestamp
         });
         await this.store.upsertTokenMemeMatch(memeMatch);

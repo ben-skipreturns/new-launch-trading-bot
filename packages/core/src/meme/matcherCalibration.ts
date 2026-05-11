@@ -1,3 +1,4 @@
+import type { MemeMatchSaturationContext } from "../domain/interfaces.js";
 import type { TokenEnrichment, TokenLaunch, TokenMemeMatch, TrendTopic, TrendTopicType } from "../domain/types.js";
 import { TokenMemeMatcher } from "./tokenMemeMatcher.js";
 import { generateAliases, normalizePhrase, slugify } from "./text.js";
@@ -15,6 +16,7 @@ export interface MatcherCalibrationFixture {
     uri?: string;
   };
   metadataText?: string;
+  saturation?: MemeMatchSaturationContext;
   topics: MatcherCalibrationTopicFixture[];
 }
 
@@ -155,6 +157,31 @@ export const matcherCalibrationFixtures: MatcherCalibrationFixture[] = [
     topics: [topic("Moo Deng baby hippo", "animal", { aliases: ["moo deng", "moodeng"] })]
   },
   {
+    id: "saturated-copycat",
+    description: "A late identical ticker on a saturated topic should be penalized below threshold.",
+    expected: "reject",
+    observedAt: BASE_OBSERVED_AT,
+    launch: { symbol: "MOODENG", name: "Moo Deng" },
+    topics: [topic("Moo Deng baby hippo", "animal", { aliases: ["moo deng", "moodeng"], likelySymbols: ["MOODENG"] })],
+    saturation: {
+      recentWindowMs: 10 * 60 * 1000,
+      topics: [{ canonicalPhrase: "moo deng baby hippo", matchCount: 20, sameSymbolCount: 4, sameNameCount: 4 }]
+    }
+  },
+  {
+    id: "saturated-specific-metadata",
+    description: "A saturated topic can still pass when metadata adds a specific topic hook.",
+    expected: "pass",
+    observedAt: BASE_OBSERVED_AT,
+    launch: { symbol: "MDHAT", name: "Moo Deng Hat" },
+    metadataText: "Moo Deng baby hippo wearing the new hat meme",
+    topics: [topic("Moo Deng baby hippo", "animal", { aliases: ["moo deng", "moodeng"], likelySymbols: ["MOODENG"] })],
+    saturation: {
+      recentWindowMs: 10 * 60 * 1000,
+      topics: [{ canonicalPhrase: "moo deng baby hippo", matchCount: 20, sameSymbolCount: 2, sameNameCount: 0 }]
+    }
+  },
+  {
     id: "public-figure-stale-spam",
     description: "Public-figure spam should fail when the relevant topic is stale.",
     expected: "reject",
@@ -182,6 +209,7 @@ export async function runMatcherCalibration(
       launch: launchFromFixture(fixture, observedAt),
       topics: fixture.topics.map(topicFromFixture),
       enrichment: enrichmentFromFixture(fixture, observedAt),
+      saturation: fixture.saturation,
       observedAt
     });
     const actual = match.rejectFlags.length === 0 ? "pass" : "reject";

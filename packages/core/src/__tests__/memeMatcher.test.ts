@@ -175,6 +175,64 @@ describe("TokenMemeMatcher", () => {
     expect(match.memeRelevanceScore).toBe(0);
     expect(match.rejectFlags).toContain("NO_TEMPORALLY_MATCHABLE_TOPICS");
   });
+
+  it("penalizes late copycats on saturated topics", async () => {
+    const match = await new TokenMemeMatcher().match({
+      launch: launch("MOODENG", "Moo Deng"),
+      topics,
+      saturation: {
+        recentWindowMs: 10 * 60 * 1000,
+        topics: [
+          {
+            canonicalPhrase: "moo deng baby hippo",
+            matchCount: 20,
+            sameSymbolCount: 4,
+            sameNameCount: 4
+          }
+        ]
+      },
+      observedAt
+    });
+
+    expect(match.memeRelevanceScore).toBeLessThan(0.7);
+    expect(match.reasons).toContain("TOPIC_SATURATION_COPYCAT");
+    expect(match.reasons).toContain("SAME_SYMBOL_COPYCAT");
+    expect(match.rejectFlags).toContain("MEME_RELEVANCE_TOO_LOW");
+  });
+
+  it("softens saturation pressure when metadata carries a specific topic hook", async () => {
+    const match = await new TokenMemeMatcher().match({
+      launch: launch("MDPLUS", "Moo Deng Hat"),
+      topics,
+      enrichment: {
+        mint: "MintMDPLUS",
+        observedAt,
+        provider: "token-metadata-uri",
+        sentimentKeywords: [],
+        socialLinks: {},
+        raw: {
+          metadataText: "Moo Deng baby hippo wearing the new hat meme"
+        }
+      },
+      saturation: {
+        recentWindowMs: 10 * 60 * 1000,
+        topics: [
+          {
+            canonicalPhrase: "moo deng baby hippo",
+            matchCount: 20,
+            sameSymbolCount: 2,
+            sameNameCount: 0
+          }
+        ]
+      },
+      observedAt
+    });
+
+    expect(match.memeRelevanceScore).toBeGreaterThanOrEqual(0.7);
+    expect(match.reasons).toContain("TOPIC_SATURATION_COPYCAT");
+    expect(match.reasons).toContain("METADATA_SPECIFIC_HOOK");
+    expect(match.rejectFlags).not.toContain("MEME_RELEVANCE_TOO_LOW");
+  });
 });
 
 function observation(phrase: string, traffic: number): TrendObservation {

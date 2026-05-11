@@ -19,6 +19,7 @@ export * from "./storage/postgresStore.js";
 export * from "./storage/store.js";
 export * from "./meme/memeTrendEngine.js";
 export * from "./meme/caseStudies.js";
+export * from "./meme/matchSaturation.js";
 export * from "./meme/matcherCalibration.js";
 export * from "./meme/tokenMemeMatcher.js";
 export * from "./meme/text.js";

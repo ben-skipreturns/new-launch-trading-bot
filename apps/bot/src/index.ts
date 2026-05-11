@@ -26,6 +26,7 @@ import {
   TradingPipeline,
   generateDailyReport,
   generateMemeReport,
+  buildMemeMatchSaturationContext,
   matcherCalibrationFixtures,
   runMatcherCalibration,
   type Enricher,
@@ -252,7 +253,8 @@ program
           persist: !options.dryRun,
           timeoutMs: metadataTimeoutMs
         });
-        const match = await matcher.match({ launch, topics, enrichment, observedAt });
+        const saturation = await buildMemeMatchSaturationContext(store, launch, observedAt);
+        const match = await matcher.match({ launch, topics, enrichment, saturation, observedAt });
         matched += 1;
         if (match.rejectFlags.length === 0) passed += 1;
         else rejected += 1;
@@ -557,7 +559,8 @@ async function runMatchStream(
         persist: !options.dryRun,
         timeoutMs: metadataTimeoutMs
       });
-      const match = await matcher.match({ launch: event.tokenLaunch, topics, enrichment, observedAt: event.timestamp });
+      const saturation = await buildMemeMatchSaturationContext(store, event.tokenLaunch, event.timestamp);
+      const match = await matcher.match({ launch: event.tokenLaunch, topics, enrichment, saturation, observedAt: event.timestamp });
       matched += 1;
       if (match.rejectFlags.length === 0) passed += 1;
       else rejected += 1;

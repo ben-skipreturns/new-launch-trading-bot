@@ -1,4 +1,4 @@
-import type { MemeMatcher } from "../domain/interfaces.js";
+import type { MemeMatcher, MemeMatchTopicSaturation } from "../domain/interfaces.js";
 import type { JsonObject, JsonValue, TokenMemeMatch, TrendTopic } from "../domain/types.js";
 import { clamp, round } from "../utils/math.js";
 import {
@@ -52,8 +52,9 @@ export class TokenMemeMatcher implements MemeMatcher {
     const matchableTopics = temporalTopics.filter(isMatchableTrendTopic);
     if (input.topics.length > 0 && matchableTopics.length === 0) rejectFlags.push("NO_MATCHABLE_TOPICS");
 
+    const metadataText = normalizePhrase(candidateParts.metadataText ?? "");
     const scored = matchableTopics
-      .map((topic) => scoreTopic(topic, normalizedCandidate, candidateSymbol))
+      .map((topic) => scoreTopic(topic, normalizedCandidate, candidateSymbol, metadataText, saturationForTopic(input.saturation, topic)))
       .sort((a, b) => b.score - a.score)[0];
     const best = scored && scored.matchStrength > 0 ? scored : undefined;
 
@@ -80,6 +81,12 @@ export class TokenMemeMatcher implements MemeMatcher {
         matchableTopics: matchableTopics.length,
         observedAt: input.observedAt.toISOString(),
         activeTopicWindowMs: this.activeTopicWindowMs,
+        saturationContext: input.saturation
+          ? {
+              recentWindowMs: input.saturation.recentWindowMs,
+              topicCount: input.saturation.topics.length
+            }
+          : null,
         bestTopic: best
           ? {
               id: best.topic.id,
@@ -121,10 +128,20 @@ interface ScoreComponents extends JsonObject {
   saturationPenalty: number;
   evidencePenalty: number;
   genericPenalty: number;
+  copycatPenalty: number;
+  topicMatchCount: number;
+  sameSymbolCount: number;
+  sameNameCount: number;
   multiplier: number;
 }
 
-function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: string): {
+function scoreTopic(
+  topic: TrendTopic,
+  candidateText: string,
+  candidateSymbol: string,
+  metadataText: string,
+  topicSaturation?: MemeMatchTopicSaturation
+): {
   topic: TrendTopic;
   score: number;
   matchStrength: number;
@@ -195,10 +212,20 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
     matchedAliases,
     topic
   });
+  const copycat = copycatPressurePenalty({
+    topic,
+    metadataText,
+    topicSaturation,
+    matchedAliases
+  });
   if (topicSaturationRisk >= 0.75) reasons.push("HIGH_SATURATION_TOPIC");
   if (openAiTopic && topic.sourceCoverage < 2) reasons.push("SINGLE_SOURCE_TOPIC");
   if (genericPenalty < 1) reasons.push("GENERIC_COPYCAT_PENALTY");
-  const multiplier = (0.62 + sourceBoost + velocityBoost + noveltyBoost) * saturationPenalty * evidencePenalty * genericPenalty;
+  if (copycat.copycatPenalty < 1) reasons.push("TOPIC_SATURATION_COPYCAT");
+  if (copycat.sameSymbolCount > 0) reasons.push("SAME_SYMBOL_COPYCAT");
+  if (copycat.sameNameCount > 0) reasons.push("SAME_NAME_COPYCAT");
+  if (copycat.hasMetadataSpecificHook) reasons.push("METADATA_SPECIFIC_HOOK");
+  const multiplier = (0.62 + sourceBoost + velocityBoost + noveltyBoost) * saturationPenalty * evidencePenalty * genericPenalty * copycat.copycatPenalty;
   const score = clamp(matchStrength * multiplier);
   return {
     topic,
@@ -214,9 +241,72 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
       saturationPenalty: round(saturationPenalty),
       evidencePenalty: round(evidencePenalty),
       genericPenalty: round(genericPenalty),
+      copycatPenalty: round(copycat.copycatPenalty),
+      topicMatchCount: copycat.topicMatchCount,
+      sameSymbolCount: copycat.sameSymbolCount,
+      sameNameCount: copycat.sameNameCount,
       multiplier: round(multiplier)
     }
   };
+}
+
+function saturationForTopic(saturation: Parameters<MemeMatcher["match"]>[0]["saturation"], topic: TrendTopic): MemeMatchTopicSaturation | undefined {
+  if (!saturation) return undefined;
+  const canonical = normalizePhrase(topic.canonicalPhrase);
+  return saturation.topics.find((item) => {
+    if (item.topicId && item.topicId === topic.id) return true;
+    return Boolean(item.canonicalPhrase && normalizePhrase(item.canonicalPhrase) === canonical);
+  });
+}
+
+function copycatPressurePenalty(input: {
+  topic: TrendTopic;
+  metadataText: string;
+  topicSaturation?: MemeMatchTopicSaturation;
+  matchedAliases: TopicMatchDiagnostics[];
+}): {
+  copycatPenalty: number;
+  topicMatchCount: number;
+  sameSymbolCount: number;
+  sameNameCount: number;
+  hasMetadataSpecificHook: boolean;
+} {
+  const topicMatchCount = input.topicSaturation?.matchCount ?? 0;
+  const sameSymbolCount = input.topicSaturation?.sameSymbolCount ?? 0;
+  const sameNameCount = input.topicSaturation?.sameNameCount ?? 0;
+  const hasMetadataSpecificHook = metadataHasSpecificTopicHook(input.topic, input.metadataText);
+
+  let penalty = 1;
+  if (topicMatchCount >= 30) penalty *= 0.68;
+  else if (topicMatchCount >= 15) penalty *= 0.78;
+  else if (topicMatchCount >= 8) penalty *= 0.88;
+
+  if (sameSymbolCount >= 5 || sameNameCount >= 5) penalty *= 0.52;
+  else if (sameSymbolCount >= 2 || sameNameCount >= 2) penalty *= 0.68;
+  else if (sameSymbolCount >= 1 || sameNameCount >= 1) penalty *= 0.82;
+
+  if (hasMetadataSpecificHook && penalty < 1) penalty = Math.max(penalty, 0.92);
+  return {
+    copycatPenalty: clamp(penalty),
+    topicMatchCount,
+    sameSymbolCount,
+    sameNameCount,
+    hasMetadataSpecificHook
+  };
+}
+
+function metadataHasSpecificTopicHook(topic: TrendTopic, metadataText: string): boolean {
+  if (!metadataText) return false;
+  const metadataContent = contentTokens(metadataText);
+  if (metadataContent.length < 2) return false;
+  for (const alias of [topic.canonicalPhrase, ...topic.aliases]) {
+    const normalized = normalizePhrase(alias);
+    const aliasContent = contentTokens(normalized);
+    if (aliasContent.length >= 2 && aliasContent.every((token) => metadataContent.includes(token))) return true;
+    const compactAlias = compactPhrase(normalized);
+    if (compactAlias.length >= 6 && compactPhrase(metadataText).includes(compactAlias)) return true;
+  }
+  return false;
 }
 
 function isTemporallyEligibleTrendTopic(
