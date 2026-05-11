@@ -116,6 +116,11 @@ const inspectCommands = [
     label: "Latest token matches",
     command:
       'docker compose exec db psql -U moonshot -d moonshot -c "select mint, canonical_phrase, meme_relevance_score, reject_flags, observed_at from token_meme_matches order by observed_at desc limit 10;"'
+  },
+  {
+    label: "Matcher calibration buckets",
+    command:
+      "open http://localhost:3000/calibration"
   }
 ];
 
@@ -312,6 +317,7 @@ export default function LocalLoopPage() {
                 <CommandRow command="npm run match:launches" writes="Yes" purpose="Matches persisted token launches, fetches token metadata, and writes token_meme_matches for command-center inspection." />
                 <CommandRow command="npm run match:stream -- --dry-run" writes="No" purpose="Streams launches through metadata fetch and matching without writing rows." />
                 <CommandRow command="npm run match:stream" writes="Yes" purpose="Streams launches, writes raw creates, token launches, metadata enrichments, and token_meme_matches only." />
+                <CommandRow command="/calibration" writes="No" purpose="Command-center page for reviewing highest-scoring rejects, weakest passes, copycat rejects, metadata failures, and near misses." />
                 <CommandRow command={'npm run match:token -- --name "..." --symbol "..."'} writes="Optional" purpose="Tests token text against active or fixture topics; add --persist to store the local match." />
                 <CommandRow command="npm run retention:launch-dry-run" writes="No" purpose="Counts expired raw/trade events and uninteresting token launches without deleting them." />
                 <CommandRow command="npm run migrate" writes="Yes" purpose="Applies SQL schema migrations to the configured database." />

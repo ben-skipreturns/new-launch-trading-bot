@@ -109,7 +109,9 @@ function StreamRow({ launch }: { launch: RawLaunchListItem }) {
   return (
     <tr>
       <td className="min-w-[210px]">
-        <div className="font-semibold text-ink">{launch.symbol ?? launch.name ?? shortMint(launch.mint)}</div>
+        <Link className="font-semibold text-ink hover:text-accent" href={`/launches/${launch.mint}`}>
+          {launch.symbol ?? launch.name ?? shortMint(launch.mint)}
+        </Link>
         {launch.name && launch.symbol ? <div className="mt-0.5 text-sm text-muted">{launch.name}</div> : null}
         <div className="mono-cell mt-0.5 text-muted">{shortMint(launch.mint)}</div>
       </td>

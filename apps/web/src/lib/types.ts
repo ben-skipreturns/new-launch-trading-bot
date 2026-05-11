@@ -193,6 +193,61 @@ export interface LaunchDetail {
   orders: PaperOrder[];
   exits: ExitEvent[];
   memeEvidenceUrls: string[];
+  memeReasons: string[];
   memeRejectFlags: string[];
+  matcherDiagnostics?: MatcherDiagnostics;
   rawFeatures?: ScoreSnapshot["features"];
+}
+
+export interface MatcherDiagnostics {
+  observedAt?: Date;
+  memeRelevanceScore: number;
+  topic?: string;
+  topicType?: TrendTopicType;
+  candidateText?: string;
+  candidateParts: Array<{ label: string; value: string }>;
+  matchedAliases: Array<{ alias: string; reason: string; strength?: number }>;
+  scoreComponents: Array<{ label: string; value: string }>;
+  topicsLoaded?: number;
+  matchableTopics?: number;
+  metadataStatus?: string;
+  metadataFailureReason?: string;
+  rawSummary?: string;
+}
+
+export interface MatcherCalibrationItem {
+  mint: string;
+  name?: string;
+  symbol?: string;
+  createdAt?: Date;
+  observedAt: Date;
+  memeRelevanceScore: number;
+  canonicalPhrase?: string;
+  topicType?: TrendTopicType;
+  reasons: string[];
+  rejectFlags: string[];
+  decision: Decision | "none";
+  expectedValueScore?: number;
+  metadataFailureReason?: string;
+  matchedAlias?: string;
+}
+
+export interface MatcherCalibrationSummary {
+  totalMatches: number;
+  passes: number;
+  rejects: number;
+  genericRejects: number;
+  metadataFailures: number;
+  weakOverlapRejects: number;
+  latestObservedAt?: Date;
+}
+
+export interface MatcherCalibrationReport {
+  generatedAt: Date;
+  summary: MatcherCalibrationSummary;
+  highestScoringRejects: MatcherCalibrationItem[];
+  lowestScoringPasses: MatcherCalibrationItem[];
+  genericCopycatRejects: MatcherCalibrationItem[];
+  metadataFailures: MatcherCalibrationItem[];
+  weakOverlapRejects: MatcherCalibrationItem[];
 }

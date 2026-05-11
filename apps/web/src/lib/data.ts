@@ -12,6 +12,9 @@ import type {
   RadarReview,
   RadarReviewCandidate,
   RadarReviewRun,
+  MatcherCalibrationItem,
+  MatcherCalibrationReport,
+  MatcherDiagnostics,
   RawLaunchListItem,
   RawLaunchPage,
   RawLaunchStats,
@@ -91,7 +94,7 @@ export async function getLaunchDetail(mint: string): Promise<DataState<LaunchDet
   return safeRead(null, async () => {
     const launch = await getLaunchByMint(mint);
     if (!launch) return null;
-    const [scoreRows, orderRows, exitRows, matchRows] = await Promise.all([
+    const [scoreRows, orderRows, exitRows, matchRows, metadataFailureRows] = await Promise.all([
       query<ScoreRow>(
         `select mint, as_of, graduation_probability, risk_score, trend_score, expected_value_score, decision, reasons, feature_snapshot
          from score_snapshots where mint = $1 order by as_of desc limit 50`,
@@ -99,22 +102,80 @@ export async function getLaunchDetail(mint: string): Promise<DataState<LaunchDet
       ),
       query<PaperOrderRow>(`select * from paper_orders where mint = $1 order by created_at desc`, [mint]),
       query<ExitEventRow>(`select * from exit_events where mint = $1 order by occurred_at desc`, [mint]),
-      query<TokenMemeMatchRow>(`select * from token_meme_matches where mint = $1 order by observed_at desc limit 1`, [mint])
+      query<TokenMemeMatchRow>(
+        `select observed_at, meme_relevance_score, canonical_phrase, topic_type, evidence_urls, reasons, reject_flags, raw
+         from token_meme_matches where mint = $1 order by observed_at desc limit 1`,
+        [mint]
+      ),
+      query<{ raw: unknown }>(
+        `select raw from token_enrichments where mint = $1 and provider = 'token-metadata-uri-failed' order by observed_at desc limit 1`,
+        [mint]
+      )
     ]);
 
     const scoreHistory = scoreRows.map(scoreFromRow);
     const orders = orderRows.map(orderFromRow);
     const exits = exitRows.map(exitFromRow);
     const latestMatch = matchRows[0];
+    const matcherDiagnostics = latestMatch ? matcherDiagnosticsFromRow(latestMatch) : undefined;
+    const metadataFailure = metadataFailureReason(metadataFailureRows[0]?.raw);
+    if (matcherDiagnostics && metadataFailure) {
+      matcherDiagnostics.metadataStatus = "failed";
+      matcherDiagnostics.metadataFailureReason = metadataFailure;
+    }
     return {
       launch,
       scoreHistory,
       orders,
       exits,
       memeEvidenceUrls: latestMatch?.evidence_urls ?? [],
+      memeReasons: latestMatch?.reasons ?? [],
       memeRejectFlags: latestMatch?.reject_flags ?? [],
+      matcherDiagnostics,
       rawFeatures: scoreHistory[0]?.features
     };
+  });
+}
+
+export async function getMatcherCalibrationReport(): Promise<DataState<MatcherCalibrationReport>> {
+  return safeRead(emptyMatcherCalibrationReport(), async () => {
+    const rows = await query<CalibrationMatchRow>(
+      `select
+         m.mint,
+         m.observed_at,
+         m.meme_relevance_score,
+         m.canonical_phrase,
+         m.topic_type,
+         m.evidence_urls,
+         m.reasons,
+         m.reject_flags,
+         m.raw,
+         tl.name,
+         tl.symbol,
+         tl.created_at,
+         latest_score.decision,
+         latest_score.expected_value_score,
+         metadata_failure.raw as metadata_failure_raw
+       from token_meme_matches m
+       join token_launches tl on tl.mint = m.mint
+       left join lateral (
+         select decision, expected_value_score
+         from score_snapshots s
+         where s.mint = m.mint
+         order by s.as_of desc
+         limit 1
+       ) latest_score on true
+       left join lateral (
+         select raw
+         from token_enrichments e
+         where e.mint = m.mint and e.provider = 'token-metadata-uri-failed'
+         order by e.observed_at desc
+         limit 1
+       ) metadata_failure on true
+       order by m.observed_at desc
+       limit 1000`
+    );
+    return matcherCalibrationFromRows(rows);
   });
 }
 
@@ -168,28 +229,44 @@ async function getLaunches(limit = 50): Promise<LaunchListItem[]> {
 }
 
 async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined> {
-  const rows = await query<LaunchRow>(
+  const rows = await query<LaunchDetailLaunchRow>(
     `select
-       s.mint,
+       tl.mint,
        tl.name,
        tl.symbol,
        tl.created_at,
-       s.as_of,
-       s.graduation_probability,
-       s.risk_score,
-       s.trend_score,
-       s.expected_value_score,
-       s.decision,
-       s.reasons,
-       s.feature_snapshot
-     from score_snapshots s
-     left join token_launches tl on tl.mint = s.mint
-     where s.mint = $1
-     order by s.as_of desc
+       latest_score.as_of,
+       latest_score.graduation_probability,
+       latest_score.risk_score,
+       latest_score.trend_score,
+       latest_score.expected_value_score,
+       latest_score.decision,
+       latest_score.reasons,
+       latest_score.feature_snapshot,
+       latest_match.observed_at as match_observed_at,
+       latest_match.meme_relevance_score,
+       latest_match.canonical_phrase,
+       latest_match.topic_type
+     from token_launches tl
+     left join lateral (
+       select *
+       from score_snapshots s
+       where s.mint = tl.mint
+       order by s.as_of desc
+       limit 1
+     ) latest_score on true
+     left join lateral (
+       select *
+       from token_meme_matches m
+       where m.mint = tl.mint
+       order by m.observed_at desc
+       limit 1
+     ) latest_match on true
+     where tl.mint = $1
      limit 1`,
     [mint]
   );
-  return rows[0] ? launchFromRow(rows[0]) : undefined;
+  return rows[0] ? launchFromDetailRow(rows[0]) : undefined;
 }
 
 async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunchPage> {
@@ -466,6 +543,25 @@ function emptyRawLaunchPage(page: number, pageSize: number): RawLaunchPage {
   };
 }
 
+function emptyMatcherCalibrationReport(): MatcherCalibrationReport {
+  return {
+    generatedAt: new Date(),
+    summary: {
+      totalMatches: 0,
+      passes: 0,
+      rejects: 0,
+      genericRejects: 0,
+      metadataFailures: 0,
+      weakOverlapRejects: 0
+    },
+    highestScoringRejects: [],
+    lowestScoringPasses: [],
+    genericCopycatRejects: [],
+    metadataFailures: [],
+    weakOverlapRejects: []
+  };
+}
+
 interface LaunchRow {
   mint: string;
   name: string | null;
@@ -479,6 +575,25 @@ interface LaunchRow {
   decision: string;
   reasons: string[];
   feature_snapshot: ScoreSnapshot["features"];
+}
+
+interface LaunchDetailLaunchRow {
+  mint: string;
+  name: string | null;
+  symbol: string | null;
+  created_at: Date | null;
+  as_of: Date | null;
+  graduation_probability: string | null;
+  risk_score: string | null;
+  trend_score: string | null;
+  expected_value_score: string | null;
+  decision: string | null;
+  reasons: string[] | null;
+  feature_snapshot: ScoreSnapshot["features"] | null;
+  match_observed_at: Date | null;
+  meme_relevance_score: string | null;
+  canonical_phrase: string | null;
+  topic_type: string | null;
 }
 
 interface RawLaunchRow {
@@ -594,8 +709,24 @@ interface ScoreRow {
 }
 
 interface TokenMemeMatchRow {
+  observed_at: Date;
+  meme_relevance_score: string;
+  canonical_phrase: string | null;
+  topic_type: string | null;
   evidence_urls: string[];
+  reasons: string[];
   reject_flags: string[];
+  raw: unknown;
+}
+
+interface CalibrationMatchRow extends TokenMemeMatchRow {
+  mint: string;
+  name: string | null;
+  symbol: string | null;
+  created_at: Date | null;
+  decision: string | null;
+  expected_value_score: string | null;
+  metadata_failure_raw: unknown;
 }
 
 function launchFromRow(row: LaunchRow): LaunchListItem {
@@ -616,6 +747,27 @@ function launchFromRow(row: LaunchRow): LaunchListItem {
     memeTopicType: features.memeMatchedTopicType,
     latestPriceSol: features.priceSol,
     reasons: row.reasons
+  };
+}
+
+function launchFromDetailRow(row: LaunchDetailLaunchRow): LaunchListItem {
+  const features = hydrateFeature(row.feature_snapshot);
+  return {
+    mint: row.mint,
+    name: row.name ?? undefined,
+    symbol: row.symbol ?? undefined,
+    createdAt: row.created_at ?? undefined,
+    latestScoreAt: row.as_of ?? row.match_observed_at ?? row.created_at ?? undefined,
+    decision: (row.decision as LaunchListItem["decision"] | null) ?? "none",
+    graduationProbability: Number(row.graduation_probability ?? 0),
+    riskScore: Number(row.risk_score ?? 0),
+    trendScore: Number(row.trend_score ?? 0),
+    expectedValueScore: Number(row.expected_value_score ?? 0),
+    memeRelevanceScore: row.meme_relevance_score !== null ? Number(row.meme_relevance_score) : features.memeRelevanceScore,
+    memeTopic: row.canonical_phrase ?? features.memeMatchedTopic,
+    memeTopicType: (row.topic_type as LaunchListItem["memeTopicType"] | null) ?? features.memeMatchedTopicType,
+    latestPriceSol: features.priceSol,
+    reasons: row.reasons ?? []
   };
 }
 
@@ -830,6 +982,97 @@ function exitFromRow(row: ExitEventRow): ExitEvent {
     priceSol: Number(row.price_sol),
     feesSol: Number(row.fees_sol)
   };
+}
+
+function matcherDiagnosticsFromRow(row: TokenMemeMatchRow): MatcherDiagnostics {
+  const raw = isRecord(row.raw) ? row.raw : {};
+  const bestTopic = isRecord(raw.bestTopic) ? raw.bestTopic : undefined;
+  const candidateParts = isRecord(raw.candidateParts) ? raw.candidateParts : {};
+  const scoreComponents = isRecord(bestTopic?.scoreComponents) ? bestTopic.scoreComponents : {};
+  const matchedAliases = Array.isArray(bestTopic?.matchedAliases) ? bestTopic.matchedAliases.filter(isRecord) : [];
+  const metadata = metadataStatusFromCandidateParts(candidateParts);
+  return {
+    observedAt: row.observed_at,
+    memeRelevanceScore: Number(row.meme_relevance_score),
+    topic: row.canonical_phrase ?? undefined,
+    topicType: isTopicType(row.topic_type) ? row.topic_type : undefined,
+    candidateText: stringValue(raw.candidateText),
+    candidateParts: Object.entries(candidateParts)
+      .map(([label, value]) => ({ label, value: typeof value === "string" ? value : value === null || value === undefined ? "" : String(value) }))
+      .filter((item) => item.value.trim().length > 0),
+    matchedAliases: matchedAliases.map((item) => ({
+      alias: stringValue(item.alias) ?? "-",
+      reason: stringValue(item.reason) ?? "-",
+      strength: numberValue(item.strength)
+    })),
+    scoreComponents: Object.entries(scoreComponents).map(([label, value]) => ({
+      label,
+      value: typeof value === "number" ? value.toFixed(3) : String(value)
+    })),
+    topicsLoaded: numberValue(raw.topicsLoaded),
+    matchableTopics: numberValue(raw.matchableTopics),
+    metadataStatus: metadata.status,
+    metadataFailureReason: metadata.failureReason,
+    rawSummary: JSON.stringify(raw, null, 2)
+  };
+}
+
+function matcherCalibrationFromRows(rows: CalibrationMatchRow[]): MatcherCalibrationReport {
+  const items = rows.map(calibrationItemFromRow);
+  const passes = items.filter((item) => item.rejectFlags.length === 0);
+  const rejects = items.filter((item) => item.rejectFlags.length > 0);
+  const genericRejects = items.filter((item) => item.rejectFlags.includes("GENERIC_SYMBOL_ONLY") || item.reasons.includes("GENERIC_COPYCAT_PENALTY"));
+  const metadataFailures = items.filter((item) => Boolean(item.metadataFailureReason));
+  const weakOverlapRejects = rejects.filter((item) => item.memeRelevanceScore >= 0.4 && item.memeRelevanceScore < 0.7);
+  return {
+    generatedAt: new Date(),
+    summary: {
+      totalMatches: items.length,
+      passes: passes.length,
+      rejects: rejects.length,
+      genericRejects: genericRejects.length,
+      metadataFailures: metadataFailures.length,
+      weakOverlapRejects: weakOverlapRejects.length,
+      latestObservedAt: items[0]?.observedAt
+    },
+    highestScoringRejects: [...rejects].sort((a, b) => b.memeRelevanceScore - a.memeRelevanceScore).slice(0, 20),
+    lowestScoringPasses: [...passes].sort((a, b) => a.memeRelevanceScore - b.memeRelevanceScore).slice(0, 20),
+    genericCopycatRejects: genericRejects.slice(0, 20),
+    metadataFailures: metadataFailures.slice(0, 20),
+    weakOverlapRejects: weakOverlapRejects.sort((a, b) => b.memeRelevanceScore - a.memeRelevanceScore).slice(0, 20)
+  };
+}
+
+function calibrationItemFromRow(row: CalibrationMatchRow): MatcherCalibrationItem {
+  const diagnostics = matcherDiagnosticsFromRow(row);
+  return {
+    mint: row.mint,
+    name: row.name ?? undefined,
+    symbol: row.symbol ?? undefined,
+    createdAt: row.created_at ?? undefined,
+    observedAt: row.observed_at,
+    memeRelevanceScore: Number(row.meme_relevance_score),
+    canonicalPhrase: row.canonical_phrase ?? undefined,
+    topicType: isTopicType(row.topic_type) ? row.topic_type : undefined,
+    reasons: row.reasons,
+    rejectFlags: row.reject_flags,
+    decision: (row.decision as MatcherCalibrationItem["decision"] | null) ?? "none",
+    expectedValueScore: numericValue(row.expected_value_score),
+    metadataFailureReason: metadataFailureReason(row.metadata_failure_raw),
+    matchedAlias: diagnostics.matchedAliases[0]?.alias
+  };
+}
+
+function metadataStatusFromCandidateParts(candidateParts: Record<string, unknown>): { status?: string; failureReason?: string } {
+  const metadataText = stringValue(candidateParts.metadataText);
+  if (!metadataText) return {};
+  if (metadataText.includes("token-metadata-uri-failed") || metadataText.includes("metadata_fetch")) return { status: "failed" };
+  return { status: "available" };
+}
+
+function metadataFailureReason(raw: unknown): string | undefined {
+  if (!isRecord(raw)) return undefined;
+  return stringValue(raw.reason);
 }
 
 function hydrateFeature(features: ScoreSnapshot["features"] | null): ScoreSnapshot["features"] {

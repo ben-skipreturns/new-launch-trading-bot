@@ -5,6 +5,7 @@ import { MetricCard } from "../../../components/metric-card";
 import { DecisionBadge, RiskBadge, StatusBadge } from "../../../components/status-badge";
 import { getLaunchDetail } from "../../../lib/data";
 import { formatAge, formatDate, formatPct, formatScore, formatSol, shortMint } from "../../../lib/format";
+import type { MatcherDiagnostics } from "../../../lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +21,7 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
           Back to launches
         </Link>
         <ErrorPanel message={detail.ok ? undefined : detail.error} />
-        <EmptyState title="Launch not found" body="This mint has no score snapshot in the command-center query window." />
+        <EmptyState title="Launch not found" body="This mint has no persisted token launch in the command-center database." />
       </div>
     );
   }
@@ -80,6 +81,7 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
             )}
           </div>
           <ReasonList title="Reject flags" items={data.memeRejectFlags} />
+          <ReasonList title="Match reasons" items={data.memeReasons} />
           <ReasonList title="Score reasons" items={launch.reasons} />
         </div>
 
@@ -106,41 +108,49 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
         </div>
       </section>
 
+      <MatcherDiagnosticsPanel diagnostics={data.matcherDiagnostics} />
+
       <section className="panel overflow-hidden rounded-md">
         <TableHeader title="Score history" />
-        <div className="overflow-x-auto">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>As of</th>
-                <th>Decision</th>
-                <th>Grad</th>
-                <th>Risk</th>
-                <th>Trend</th>
-                <th>EV</th>
-                <th>Reasons</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.scoreHistory.map((score) => (
-                <tr key={`${score.mint}-${score.asOf.toISOString()}`}>
-                  <td>
-                    <div>{formatAge(score.asOf)}</div>
-                    <div className="text-xs text-muted">{formatDate(score.asOf)}</div>
-                  </td>
-                  <td>
-                    <DecisionBadge decision={score.decision} />
-                  </td>
-                  <td>{formatScore(score.graduationProbability)}</td>
-                  <td>{formatScore(score.riskScore)}</td>
-                  <td>{formatScore(score.trendScore)}</td>
-                  <td>{formatScore(score.expectedValueScore)}</td>
-                  <td className="max-w-[420px] text-muted">{score.reasons.join(", ") || "-"}</td>
+        {data.scoreHistory.length ? (
+          <div className="overflow-x-auto">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>As of</th>
+                  <th>Decision</th>
+                  <th>Grad</th>
+                  <th>Risk</th>
+                  <th>Trend</th>
+                  <th>EV</th>
+                  <th>Reasons</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {data.scoreHistory.map((score) => (
+                  <tr key={`${score.mint}-${score.asOf.toISOString()}`}>
+                    <td>
+                      <div>{formatAge(score.asOf)}</div>
+                      <div className="text-xs text-muted">{formatDate(score.asOf)}</div>
+                    </td>
+                    <td>
+                      <DecisionBadge decision={score.decision} />
+                    </td>
+                    <td>{formatScore(score.graduationProbability)}</td>
+                    <td>{formatScore(score.riskScore)}</td>
+                    <td>{formatScore(score.trendScore)}</td>
+                    <td>{formatScore(score.expectedValueScore)}</td>
+                    <td className="max-w-[420px] text-muted">{score.reasons.join(", ") || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-4">
+            <EmptyState title="No score history" body="This launch may have only been streamed and meme-matched so far." />
+          </div>
+        )}
       </section>
 
       <section className="grid grid-cols-2 gap-4 max-[1120px]:grid-cols-1">
@@ -217,6 +227,88 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
         </div>
       </section>
     </div>
+  );
+}
+
+function MatcherDiagnosticsPanel({ diagnostics }: { diagnostics?: MatcherDiagnostics }) {
+  if (!diagnostics) {
+    return (
+      <section className="panel rounded-md p-4">
+        <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Matcher diagnostics</h2>
+        <div className="mt-4 text-sm text-muted">No token_meme_matches row is stored for this launch.</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="grid grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)] gap-4 max-[1120px]:grid-cols-1">
+      <div className="panel rounded-md p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Matcher diagnostics</h2>
+            <div className="mt-1 text-sm text-muted">Matched {formatAge(diagnostics.observedAt)} against {diagnostics.matchableTopics ?? 0}/{diagnostics.topicsLoaded ?? 0} active topics.</div>
+          </div>
+          <StatusBadge label={diagnostics.metadataStatus ?? "metadata unknown"} tone={diagnostics.metadataStatus === "failed" ? "reject" : "neutral"} />
+        </div>
+
+        <div className="mt-4 grid grid-cols-3 gap-3 text-sm max-[860px]:grid-cols-1">
+          <Field label="Match score" value={formatScore(diagnostics.memeRelevanceScore)} />
+          <Field label="Topic" value={diagnostics.topic ?? "-"} />
+          <Field label="Observed" value={formatDate(diagnostics.observedAt)} />
+        </div>
+
+        {diagnostics.metadataFailureReason ? (
+          <div className="mt-4 rounded-md border border-reject/25 bg-reject/10 p-3 text-sm text-reject">
+            Metadata fetch failed: {diagnostics.metadataFailureReason}
+          </div>
+        ) : null}
+
+        <div className="mt-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Candidate text</div>
+          <pre className="code-block mt-2 max-h-32 overflow-auto rounded-md p-3 text-xs leading-5">
+            <code>{diagnostics.candidateText || "No normalized candidate text stored."}</code>
+          </pre>
+        </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-3 max-[860px]:grid-cols-1">
+          {diagnostics.candidateParts.map((part) => (
+            <Field key={part.label} label={part.label.replaceAll("_", " ")} value={part.value} />
+          ))}
+        </div>
+      </div>
+
+      <div className="panel rounded-md p-4">
+        <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Score breakdown</h2>
+        <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+          {diagnostics.scoreComponents.length ? (
+            diagnostics.scoreComponents.map((component) => (
+              <Field key={component.label} label={component.label.replaceAll(/([A-Z])/g, " $1")} value={component.value} />
+            ))
+          ) : (
+            <div className="text-sm text-muted">No score components stored.</div>
+          )}
+        </div>
+
+        <div className="mt-5">
+          <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Matched aliases</div>
+          {diagnostics.matchedAliases.length ? (
+            <div className="mt-2 space-y-2">
+              {diagnostics.matchedAliases.slice(0, 8).map((alias, index) => (
+                <div className="field-tile rounded-md px-3 py-2 text-sm" key={`${alias.alias}-${alias.reason}-${index}`}>
+                  <div className="font-semibold text-ink">{alias.alias}</div>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    <StatusBadge label={alias.reason.replaceAll("_", " ")} tone="open" />
+                    <StatusBadge label={formatScore(alias.strength)} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-2 text-sm text-muted">No alias produced positive match strength.</div>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
