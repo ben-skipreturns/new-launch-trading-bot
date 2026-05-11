@@ -1,7 +1,18 @@
 import type { MemeMatcher } from "../domain/interfaces.js";
-import type { JsonValue, TokenMemeMatch, TrendTopic } from "../domain/types.js";
+import type { JsonObject, JsonValue, TokenMemeMatch, TrendTopic } from "../domain/types.js";
 import { clamp, round } from "../utils/math.js";
-import { acronym, compactPhrase, consonantSkeleton, contentTokens, isGenericOnly, normalizePhrase, similarity, tokenize } from "./text.js";
+import {
+  acronym,
+  compactPhrase,
+  consonantSkeleton,
+  contentTokens,
+  genericTokenWordCount,
+  isGenericOnly,
+  isGenericTokenWord,
+  normalizePhrase,
+  similarity,
+  tokenize
+} from "./text.js";
 
 export interface TokenMemeMatcherOptions {
   minScore?: number;
@@ -15,20 +26,14 @@ export class TokenMemeMatcher implements MemeMatcher {
   }
 
   async match(input: Parameters<MemeMatcher["match"]>[0]): Promise<TokenMemeMatch> {
-    const candidateText = [
-      input.launch.name,
-      input.launch.symbol,
-      input.launch.uri,
-      ...Object.values(input.enrichment?.socialLinks ?? {}),
-      ...(input.enrichment?.sentimentKeywords ?? [])
-    ]
-      .filter(Boolean)
-      .join(" ");
+    const candidateParts = buildCandidateTextParts(input);
+    const candidateText = Object.values(candidateParts).filter(Boolean).join(" ");
     const normalizedCandidate = normalizePhrase(candidateText);
     const candidateSymbol = normalizePhrase(input.launch.symbol ?? "");
     const rejectFlags: string[] = [];
     if (!normalizedCandidate) rejectFlags.push("NO_TOKEN_TEXT");
     if (isGenericOnly(normalizedCandidate)) rejectFlags.push("GENERIC_TOKEN_TEXT");
+    if (isGenericSymbolOnly(candidateSymbol, normalizedCandidate)) rejectFlags.push("GENERIC_SYMBOL_ONLY");
 
     const matchableTopics = input.topics.filter(isMatchableTrendTopic);
     if (input.topics.length > 0 && matchableTopics.length === 0) rejectFlags.push("NO_MATCHABLE_TOPICS");
@@ -36,33 +41,39 @@ export class TokenMemeMatcher implements MemeMatcher {
     const scored = matchableTopics
       .map((topic) => scoreTopic(topic, normalizedCandidate, candidateSymbol))
       .sort((a, b) => b.score - a.score)[0];
+    const best = scored && scored.matchStrength > 0 ? scored : undefined;
 
-    const reasons = scored?.reasons ?? [];
-    const score = scored ? round(scored.score) : 0;
+    const reasons = best?.reasons ?? [];
+    const score = best ? round(best.score) : 0;
     if (score < this.minScore) rejectFlags.push("MEME_RELEVANCE_TOO_LOW");
 
     return {
       mint: input.launch.mint,
       observedAt: input.observedAt,
       memeRelevanceScore: score,
-      topicId: scored?.topic.id,
-      canonicalPhrase: scored?.topic.canonicalPhrase,
-      topicType: scored?.topic.topicType,
-      aliases: scored?.topic.aliases ?? [],
-      evidenceUrls: scored?.topic.evidenceUrls ?? [],
+      topicId: best?.topic.id,
+      canonicalPhrase: best?.topic.canonicalPhrase,
+      topicType: best?.topic.topicType,
+      aliases: best?.topic.aliases ?? [],
+      evidenceUrls: best?.topic.evidenceUrls ?? [],
       reasons,
       rejectFlags,
       raw: {
         candidateText: normalizedCandidate,
-        bestTopic: scored
+        candidateParts,
+        topicsLoaded: input.topics.length,
+        matchableTopics: matchableTopics.length,
+        bestTopic: best
           ? {
-              id: scored.topic.id,
-              canonicalPhrase: scored.topic.canonicalPhrase,
-              matchStrength: scored.matchStrength,
-              velocityScore: scored.topic.velocityScore,
-              noveltyScore: scored.topic.noveltyScore,
-              sourceCoverage: scored.topic.sourceCoverage,
-              saturationRisk: saturationRisk(scored.topic)
+              id: best.topic.id,
+              canonicalPhrase: best.topic.canonicalPhrase,
+              matchStrength: best.matchStrength,
+              matchedAliases: best.matchedAliases,
+              scoreComponents: best.scoreComponents,
+              velocityScore: best.topic.velocityScore,
+              noveltyScore: best.topic.noveltyScore,
+              sourceCoverage: best.topic.sourceCoverage,
+              saturationRisk: saturationRisk(best.topic)
             }
           : null
       } as JsonValue
@@ -70,16 +81,45 @@ export class TokenMemeMatcher implements MemeMatcher {
   }
 }
 
+interface CandidateTextParts extends JsonObject {
+  name: string | null;
+  symbol: string | null;
+  uriText: string | null;
+  metadataText: string | null;
+  socialText: string | null;
+  sentimentText: string | null;
+}
+
+interface TopicMatchDiagnostics {
+  alias: string;
+  reason: string;
+  strength: number;
+}
+
+interface ScoreComponents extends JsonObject {
+  sourceBoost: number;
+  velocityBoost: number;
+  noveltyBoost: number;
+  saturationRisk: number;
+  saturationPenalty: number;
+  evidencePenalty: number;
+  genericPenalty: number;
+  multiplier: number;
+}
+
 function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: string): {
   topic: TrendTopic;
   score: number;
   matchStrength: number;
   reasons: string[];
+  matchedAliases: TopicMatchDiagnostics[];
+  scoreComponents: ScoreComponents;
 } {
   const candidateCompact = compactPhrase(candidateText);
   const candidateTokens = new Set(tokenize(candidateText));
   const candidateContent = contentTokens(candidateText);
   const reasons: string[] = [];
+  const matchedAliases: TopicMatchDiagnostics[] = [];
   let matchStrength = 0;
 
   for (const alias of topic.aliases) {
@@ -92,8 +132,7 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
     const symbolSkeleton = consonantSkeleton(candidateSymbol);
 
     if (aliasNormalized.includes(" ") && candidateText.includes(aliasNormalized)) {
-      matchStrength = Math.max(matchStrength, 0.96);
-      reasons.push("EXACT_PHRASE_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "EXACT_PHRASE_MATCH", 0.96);
     }
     if (
       aliasCompact.length >= 4 &&
@@ -101,33 +140,26 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
         (aliasCompact.length >= 8 && candidateCompact.includes(aliasCompact)) ||
         candidateSymbol === aliasCompact)
     ) {
-      matchStrength = Math.max(matchStrength, 0.92);
-      reasons.push("COMPACT_PHRASE_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "COMPACT_PHRASE_MATCH", 0.92);
     }
     if (candidateSymbol && aliasNormalized.length >= 3 && candidateSymbol === aliasNormalized) {
-      matchStrength = Math.max(matchStrength, 0.86);
-      reasons.push("SYMBOL_ALIAS_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "SYMBOL_ALIAS_MATCH", 0.86);
     }
     if (aliasTokens.length > 0 && aliasTokens.every((token) => candidateTokens.has(token))) {
-      matchStrength = Math.max(matchStrength, aliasTokens.length >= 2 ? 0.86 : 0.55);
-      reasons.push("TOKEN_SET_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "TOKEN_SET_MATCH", aliasTokens.length >= 2 ? 0.86 : 0.55);
     }
     if (candidateSymbol && aliasAcronym.length >= 2 && candidateSymbol === aliasAcronym) {
-      matchStrength = Math.max(matchStrength, 0.84);
-      reasons.push("ACRONYM_SYMBOL_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "ACRONYM_SYMBOL_MATCH", 0.84);
     }
     if (candidateSymbol && aliasSkeleton.length >= 3 && symbolSkeleton === aliasSkeleton) {
-      matchStrength = Math.max(matchStrength, 0.88);
-      reasons.push("CONSONANT_SYMBOL_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "CONSONANT_SYMBOL_MATCH", 0.88);
     }
     const fuzzy = Math.max(similarity(aliasNormalized, candidateText), similarity(aliasCompact, candidateCompact));
     if (fuzzy >= 0.84) {
-      matchStrength = Math.max(matchStrength, 0.74);
-      reasons.push("FUZZY_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "FUZZY_MATCH", 0.74);
     }
     if (aliasContent.length > 0 && candidateContent.length > 0 && aliasContent.every((token) => candidateContent.includes(token))) {
-      matchStrength = Math.max(matchStrength, 0.78);
-      reasons.push("CONTENT_WORD_MATCH");
+      matchStrength = recordMatch(matchStrength, matchedAliases, reasons, aliasNormalized, "CONTENT_WORD_MATCH", 0.78);
     }
   }
 
@@ -138,15 +170,129 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
   const openAiTopic = hasOpenAiMemeTopic(topic);
   const saturationPenalty = 1 - topicSaturationRisk * 0.32;
   const evidencePenalty = openAiTopic && topic.sourceCoverage < 2 ? 0.9 : 1;
+  const genericPenalty = genericMatchPenalty({
+    candidateText,
+    candidateSymbol,
+    candidateContent,
+    matchStrength,
+    matchedAliases,
+    topic
+  });
   if (topicSaturationRisk >= 0.75) reasons.push("HIGH_SATURATION_TOPIC");
   if (openAiTopic && topic.sourceCoverage < 2) reasons.push("SINGLE_SOURCE_TOPIC");
-  const score = clamp(matchStrength * (0.62 + sourceBoost + velocityBoost + noveltyBoost) * saturationPenalty * evidencePenalty);
+  if (genericPenalty < 1) reasons.push("GENERIC_COPYCAT_PENALTY");
+  const multiplier = (0.62 + sourceBoost + velocityBoost + noveltyBoost) * saturationPenalty * evidencePenalty * genericPenalty;
+  const score = clamp(matchStrength * multiplier);
   return {
     topic,
     score,
     matchStrength,
-    reasons: [...new Set(reasons)]
+    reasons: [...new Set(reasons)],
+    matchedAliases,
+    scoreComponents: {
+      sourceBoost: round(sourceBoost),
+      velocityBoost: round(velocityBoost),
+      noveltyBoost: round(noveltyBoost),
+      saturationRisk: round(topicSaturationRisk),
+      saturationPenalty: round(saturationPenalty),
+      evidencePenalty: round(evidencePenalty),
+      genericPenalty: round(genericPenalty),
+      multiplier: round(multiplier)
+    }
   };
+}
+
+function buildCandidateTextParts(input: Parameters<MemeMatcher["match"]>[0]): CandidateTextParts {
+  const socialText = Object.values(input.enrichment?.socialLinks ?? {}).filter(Boolean).join(" ") || null;
+  const sentimentText = input.enrichment?.sentimentKeywords?.join(" ") || null;
+  return {
+    name: input.launch.name ?? null,
+    symbol: input.launch.symbol ?? null,
+    uriText: uriTextForMatching(input.launch.uri),
+    metadataText: metadataTextFromRaw(input.enrichment?.raw),
+    socialText,
+    sentimentText
+  };
+}
+
+function uriTextForMatching(uri?: string): string | null {
+  if (!uri) return null;
+  if (/^(https?|ipfs|ar):/i.test(uri)) return null;
+  return uri;
+}
+
+function metadataTextFromRaw(raw: JsonValue | undefined): string | null {
+  if (!isRecord(raw)) return null;
+  const direct = raw.metadataText;
+  if (typeof direct === "string" && direct.trim()) return direct;
+  const metadata = raw.metadata;
+  if (isRecord(metadata)) {
+    const text = [
+      metadata.name,
+      metadata.symbol,
+      metadata.description,
+      metadata.image,
+      metadata.external_url,
+      metadata.website,
+      metadata.twitter,
+      metadata.x,
+      metadata.telegram
+    ]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .join(" ");
+    if (text) return text;
+  }
+  for (const value of Object.values(raw)) {
+    if (isRecord(value)) {
+      const nested = metadataTextFromRaw(value as JsonValue);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+function recordMatch(
+  currentStrength: number,
+  matchedAliases: TopicMatchDiagnostics[],
+  reasons: string[],
+  alias: string,
+  reason: string,
+  strength: number
+): number {
+  reasons.push(reason);
+  matchedAliases.push({ alias, reason, strength: round(strength) });
+  return Math.max(currentStrength, strength);
+}
+
+function isGenericSymbolOnly(candidateSymbol: string, candidateText: string): boolean {
+  return Boolean(candidateSymbol && isGenericTokenWord(candidateSymbol) && contentTokens(candidateText).length === 0);
+}
+
+function genericMatchPenalty(input: {
+  candidateText: string;
+  candidateSymbol: string;
+  candidateContent: string[];
+  matchStrength: number;
+  matchedAliases: TopicMatchDiagnostics[];
+  topic: TrendTopic;
+}): number {
+  if (input.matchStrength <= 0) return 1;
+  const symbolIsGeneric = Boolean(input.candidateSymbol && isGenericTokenWord(input.candidateSymbol));
+  const genericOnly = isGenericOnly(input.candidateText);
+  const genericWords = genericTokenWordCount(input.candidateText);
+  const hasSpecificCandidateWords = input.candidateContent.length > 0;
+  const hasStrongSpecificMatch = input.matchedAliases.some(
+    (match) =>
+      match.strength >= 0.9 &&
+      (match.reason === "EXACT_PHRASE_MATCH" || match.reason === "COMPACT_PHRASE_MATCH") &&
+      contentTokens(match.alias).length > 0
+  );
+
+  if (genericOnly || (symbolIsGeneric && !hasSpecificCandidateWords)) return 0.25;
+  if (genericWords > 0 && !hasSpecificCandidateWords) return 0.4;
+  if (symbolIsGeneric && !hasStrongSpecificMatch) return 0.68;
+  if (saturationRisk(input.topic) >= 0.7 && !hasStrongSpecificMatch && genericWords > 0) return 0.78;
+  return 1;
 }
 
 function saturationRisk(topic: TrendTopic): number {

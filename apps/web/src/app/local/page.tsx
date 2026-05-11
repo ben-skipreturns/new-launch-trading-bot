@@ -55,12 +55,15 @@ const launchStreamLoop = [
 const tokenMatchLoop = [
   'npm run match:token -- --fixture-topics --name "Moo Deng" --symbol MOODENG',
   "npm run stream:test -- --source fixture --max-launches 10 --persist",
-  "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000 --dry-run",
-  "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000",
+  "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000 --skip-metadata --dry-run",
+  "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000 --skip-metadata",
+  "npm run match:stream -- --source fixture --fixture-topics --max-launches 10 --skip-metadata --dry-run",
   "npm run start --workspace @moonshot/bot -- trend-refresh",
   "npm run stream:test -- --source pumpapi --duration-seconds 60 --max-launches 10 --persist",
   "npm run match:launches -- --limit 25 --since-hours 72 --dry-run",
   "npm run match:launches -- --limit 25 --since-hours 72",
+  "npm run match:stream -- --source pumpapi --duration-seconds 60 --max-launches 25 --dry-run",
+  "npm run match:stream -- --source pumpapi --duration-seconds 60 --max-launches 25",
   'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>"',
   'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>" --persist'
 ];
@@ -144,6 +147,10 @@ const troubleshooting = [
   {
     issue: "match-launches finds no launches",
     fix: "Run npm run stream:test with --persist first, or increase --since-hours if you are matching older fixture data."
+  },
+  {
+    issue: "match-stream is slow",
+    fix: "Metadata URI fetches have a short timeout, but slow gateways can still add latency. Use --skip-metadata to isolate stream and matcher behavior."
   },
   {
     issue: "match-token says DATABASE_URL is required",
@@ -245,10 +252,10 @@ export default function LocalLoopPage() {
           <div>
             <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Token matching loop</h2>
             <p className="mt-3 text-sm leading-6 text-muted">
-              Use this after the launch stream loop. The single-token command proves matcher mechanics, while match-launches runs the same matcher across persisted stream launches.
+              Use this after the launch stream loop. The single-token command proves matcher mechanics, match-launches runs across persisted launches, and match-stream streams new launches through the matcher without scoring or paper trading.
             </p>
             <p className="mt-3 text-sm leading-6 text-muted">
-              Run match-launches with --dry-run first. Drop --dry-run when you want the results written to token_meme_matches and visible in the command center.
+              Run with --dry-run first. Drop --dry-run when you want token metadata enrichments and token_meme_matches written for command-center inspection.
             </p>
           </div>
           <PreBlock lines={tokenMatchLoop} />
@@ -302,7 +309,9 @@ export default function LocalLoopPage() {
                 <CommandRow command="npm run start --workspace @moonshot/bot -- trend-refresh" writes="Yes" purpose="Runs the OpenAI meme radar and writes topics, observations, and refresh audit rows." />
                 <CommandRow command="npm run stream:test -- --source pumpapi" writes="Optional" purpose="Prints live token create events; add --persist to store only raw creates and token launches." />
                 <CommandRow command="npm run match:launches -- --dry-run" writes="No" purpose="Matches persisted token launches against active topics without writing token_meme_matches." />
-                <CommandRow command="npm run match:launches" writes="Yes" purpose="Matches persisted token launches and writes token_meme_matches for command-center inspection." />
+                <CommandRow command="npm run match:launches" writes="Yes" purpose="Matches persisted token launches, fetches token metadata, and writes token_meme_matches for command-center inspection." />
+                <CommandRow command="npm run match:stream -- --dry-run" writes="No" purpose="Streams launches through metadata fetch and matching without writing rows." />
+                <CommandRow command="npm run match:stream" writes="Yes" purpose="Streams launches, writes raw creates, token launches, metadata enrichments, and token_meme_matches only." />
                 <CommandRow command={'npm run match:token -- --name "..." --symbol "..."'} writes="Optional" purpose="Tests token text against active or fixture topics; add --persist to store the local match." />
                 <CommandRow command="npm run retention:launch-dry-run" writes="No" purpose="Counts expired raw/trade events and uninteresting token launches without deleting them." />
                 <CommandRow command="npm run migrate" writes="Yes" purpose="Applies SQL schema migrations to the configured database." />

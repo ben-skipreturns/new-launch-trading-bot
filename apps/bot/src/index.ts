@@ -21,6 +21,7 @@ import {
   ReplayRunner,
   StaticFixtureEnricher,
   StaticTrendSource,
+  TokenMetadataEnricher,
   TokenMemeMatcher,
   TradingPipeline,
   generateDailyReport,
@@ -207,6 +208,8 @@ program
   .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
   .option("--include-existing", "Re-match launches that already have a token_meme_match", false)
   .option("--dry-run", "Print match results without writing token_meme_matches", false)
+  .option("--skip-metadata", "Skip token URI metadata fetching before matching", false)
+  .option("--metadata-timeout-ms <milliseconds>", "Per-token metadata fetch timeout", "2500")
   .option("--min-score <score>", "Meme relevance threshold", "0.7")
   .action(async (options: MatchLaunchesOptions) => {
     if (!options.databaseUrl) throw new Error("DATABASE_URL is required for match-launches.");
@@ -214,6 +217,7 @@ program
     const limit = parsePositiveIntegerOption(options.limit, "--limit");
     const sinceHours = parsePositiveNumberOption(options.sinceHours, "--since-hours");
     const minScore = parseNumberOption(options.minScore, "--min-score");
+    const metadataTimeoutMs = parsePositiveIntegerOption(options.metadataTimeoutMs, "--metadata-timeout-ms");
     const store = createStore(options.databaseUrl);
 
     try {
@@ -241,7 +245,12 @@ program
           continue;
         }
 
-        const match = await matcher.match({ launch, topics, observedAt });
+        const enrichment = await getMatchingEnrichment(store, launch, {
+          fetchMetadata: !options.skipMetadata,
+          persist: !options.dryRun,
+          timeoutMs: metadataTimeoutMs
+        });
+        const match = await matcher.match({ launch, topics, enrichment, observedAt });
         matched += 1;
         if (match.rejectFlags.length === 0) passed += 1;
         else rejected += 1;
@@ -259,6 +268,36 @@ program
       if (topics.length === 0) {
         console.log("No topics were available. Run trend-refresh first, or use --fixture-topics for a deterministic local check.");
       }
+    } finally {
+      await closeStore(store);
+    }
+  });
+
+program
+  .command("match-stream")
+  .description("Stream launches and run meme matching only; no scoring, paper trading, or wallet execution.")
+  .option("--source <source>", "fixture or pumpapi", "pumpapi")
+  .option("--fixture <path>", "JSONL fixture path", "fixtures/pumpapi-events.jsonl")
+  .option("--duration-seconds <seconds>", "Stop streaming after this many seconds", "60")
+  .option("--max-launches <count>", "Stop after this many create events", "25")
+  .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
+  .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
+  .option("--refresh-trends", "Refresh trend topics at startup before matching", false)
+  .option("--dry-run", "Print match results without writing raw events, launches, enrichments, or matches", false)
+  .option("--skip-metadata", "Skip token URI metadata fetching before matching", false)
+  .option("--metadata-timeout-ms <milliseconds>", "Per-token metadata fetch timeout", "2500")
+  .option("--min-score <score>", "Meme relevance threshold", "0.7")
+  .action(async (options: MatchStreamOptions) => {
+    if (!options.databaseUrl && !(options.dryRun && options.fixtureTopics)) {
+      throw new Error("DATABASE_URL is required for match-stream unless --dry-run and --fixture-topics are both used.");
+    }
+
+    const store = createStore(options.databaseUrl);
+    try {
+      const result = await runMatchStream(createLaunchFeed(options.source, options.fixture), store, options);
+      console.log(
+        `Match stream complete: ${result.events} events read, ${result.launches} launches, ${result.matched} matched (${result.passed} pass, ${result.rejected} reject), ${result.persisted} persisted.`
+      );
     } finally {
       await closeStore(store);
     }
@@ -392,6 +431,22 @@ interface MatchLaunchesOptions {
   fixtureTopics: boolean;
   includeExisting: boolean;
   dryRun: boolean;
+  skipMetadata: boolean;
+  metadataTimeoutMs: string;
+  minScore: string;
+}
+
+interface MatchStreamOptions {
+  source: string;
+  fixture: string;
+  durationSeconds: string;
+  maxLaunches: string;
+  databaseUrl?: string;
+  fixtureTopics: boolean;
+  refreshTrends: boolean;
+  dryRun: boolean;
+  skipMetadata: boolean;
+  metadataTimeoutMs: string;
   minScore: string;
 }
 
@@ -440,6 +495,72 @@ async function runLaunchStreamTest(
   }
 
   return { events, launches, ignoredEvents, persistedLaunches };
+}
+
+async function runMatchStream(
+  feed: LaunchFeed,
+  store: Store,
+  options: MatchStreamOptions
+): Promise<{ events: number; launches: number; matched: number; passed: number; rejected: number; persisted: number }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000);
+  const observedAt = new Date();
+  const topicStore = options.fixtureTopics && options.dryRun ? new MemoryStore() : store;
+  if (options.fixtureTopics) {
+    await refreshTrends(topicStore, fixtureTrendSources());
+  } else if (options.refreshTrends) {
+    await refreshTrends(store, liveTrendSources(store));
+  }
+  const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
+  const matcher = new TokenMemeMatcher({ minScore: parseNumberOption(options.minScore, "--min-score") });
+  const metadataTimeoutMs = parsePositiveIntegerOption(options.metadataTimeoutMs, "--metadata-timeout-ms");
+  const maxLaunches = parsePositiveIntegerOption(options.maxLaunches, "--max-launches");
+  let events = 0;
+  let launches = 0;
+  let matched = 0;
+  let passed = 0;
+  let rejected = 0;
+  let persisted = 0;
+
+  try {
+    for await (const event of feed.stream(controller.signal)) {
+      events += 1;
+      if (!event.tokenLaunch) continue;
+
+      launches += 1;
+      if (!options.dryRun) {
+        await store.upsertRawEvent(event);
+        await store.upsertTokenLaunch(event.tokenLaunch);
+      }
+
+      const enrichment = await getMatchingEnrichment(store, event.tokenLaunch, {
+        fetchMetadata: !options.skipMetadata,
+        persist: !options.dryRun,
+        timeoutMs: metadataTimeoutMs
+      });
+      const match = await matcher.match({ launch: event.tokenLaunch, topics, enrichment, observedAt: event.timestamp });
+      matched += 1;
+      if (match.rejectFlags.length === 0) passed += 1;
+      else rejected += 1;
+      if (!options.dryRun) {
+        await store.upsertTokenMemeMatch(match);
+        persisted += 1;
+      }
+      printPersistedLaunchMatch(event.tokenLaunch, match);
+
+      if (launches >= maxLaunches) {
+        controller.abort();
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (topics.length === 0) {
+    console.log("No topics were available. Run trend-refresh first, use --refresh-trends, or use --fixture-topics for a deterministic check.");
+  }
+  return { events, launches, matched, passed, rejected, persisted };
 }
 
 function createLaunchFeed(source: string, fixturePath: string): LaunchFeed {
@@ -517,6 +638,31 @@ function printPersistedLaunchMatch(launch: TokenLaunch, match: Awaited<ReturnTyp
       `rejects=${match.rejectFlags.length > 0 ? match.rejectFlags.join("|") : "none"}`
     ].join(" ")
   );
+}
+
+async function getMatchingEnrichment(
+  store: Store,
+  launch: TokenLaunch,
+  options: { fetchMetadata: boolean; persist: boolean; timeoutMs: number }
+): Promise<TokenEnrichment | null> {
+  const existing = await store.getLatestEnrichment(launch.mint);
+  if (!options.fetchMetadata) return existing ?? null;
+  if (hasMetadataEnrichment(existing)) return existing ?? null;
+
+  try {
+    const metadata = await new TokenMetadataEnricher({ timeoutMs: options.timeoutMs }).enrich(launch);
+    if (!metadata) return existing ?? null;
+    if (options.persist) await store.upsertTokenEnrichment(metadata);
+    return metadata;
+  } catch {
+    return existing ?? null;
+  }
+}
+
+function hasMetadataEnrichment(enrichment?: TokenEnrichment | null): boolean {
+  if (!enrichment) return false;
+  if (enrichment.provider.includes("token-metadata-uri")) return true;
+  return typeof enrichment.raw === "object" && enrichment.raw !== null && !Array.isArray(enrichment.raw) && "metadataText" in enrichment.raw;
 }
 
 function formatMatchedTopic(match: Awaited<ReturnType<TokenMemeMatcher["match"]>>): string {
@@ -623,7 +769,7 @@ async function printLatestTrendRefreshRun(store: Store): Promise<void> {
 }
 
 function liveEnricher(): Enricher {
-  return new CompositeEnricher([new DexScreenerEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()]);
+  return new CompositeEnricher([new TokenMetadataEnricher(), new DexScreenerEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()]);
 }
 
 function liveTrendSources(store: Store): TrendSource[] {

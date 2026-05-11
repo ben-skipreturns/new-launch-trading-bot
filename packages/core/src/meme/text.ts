@@ -111,6 +111,14 @@ export function isGenericOnly(value: string): boolean {
   return tokens.length > 0 && tokens.every((token) => GENERIC_TOKEN_WORDS.has(token));
 }
 
+export function isGenericTokenWord(value: string): boolean {
+  return GENERIC_TOKEN_WORDS.has(normalizePhrase(value));
+}
+
+export function genericTokenWordCount(value: string): number {
+  return tokenize(value).filter((token) => GENERIC_TOKEN_WORDS.has(token)).length;
+}
+
 function levenshtein(a: string, b: string): number {
   const matrix = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
   for (let i = 0; i <= a.length; i += 1) matrix[i][0] = i;
