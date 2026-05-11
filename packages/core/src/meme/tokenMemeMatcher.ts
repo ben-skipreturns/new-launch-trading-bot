@@ -16,13 +16,19 @@ import {
 
 export interface TokenMemeMatcherOptions {
   minScore?: number;
+  activeTopicWindowMs?: number | null;
+  requireTopicFirstSeenBeforeObservedAt?: boolean;
 }
 
 export class TokenMemeMatcher implements MemeMatcher {
   private readonly minScore: number;
+  private readonly activeTopicWindowMs: number | null;
+  private readonly requireTopicFirstSeenBeforeObservedAt: boolean;
 
   constructor(options: TokenMemeMatcherOptions = {}) {
     this.minScore = options.minScore ?? 0.7;
+    this.activeTopicWindowMs = options.activeTopicWindowMs === undefined ? 48 * 60 * 60 * 1000 : options.activeTopicWindowMs;
+    this.requireTopicFirstSeenBeforeObservedAt = options.requireTopicFirstSeenBeforeObservedAt ?? true;
   }
 
   async match(input: Parameters<MemeMatcher["match"]>[0]): Promise<TokenMemeMatch> {
@@ -35,7 +41,15 @@ export class TokenMemeMatcher implements MemeMatcher {
     if (isGenericOnly(normalizedCandidate)) rejectFlags.push("GENERIC_TOKEN_TEXT");
     if (isGenericSymbolOnly(candidateSymbol, normalizedCandidate)) rejectFlags.push("GENERIC_SYMBOL_ONLY");
 
-    const matchableTopics = input.topics.filter(isMatchableTrendTopic);
+    const temporalTopics = input.topics.filter((topic) =>
+      isTemporallyEligibleTrendTopic(topic, input.observedAt, {
+        activeTopicWindowMs: this.activeTopicWindowMs,
+        requireTopicFirstSeenBeforeObservedAt: this.requireTopicFirstSeenBeforeObservedAt
+      })
+    );
+    if (input.topics.length > 0 && temporalTopics.length === 0) rejectFlags.push("NO_TEMPORALLY_MATCHABLE_TOPICS");
+
+    const matchableTopics = temporalTopics.filter(isMatchableTrendTopic);
     if (input.topics.length > 0 && matchableTopics.length === 0) rejectFlags.push("NO_MATCHABLE_TOPICS");
 
     const scored = matchableTopics
@@ -62,7 +76,10 @@ export class TokenMemeMatcher implements MemeMatcher {
         candidateText: normalizedCandidate,
         candidateParts,
         topicsLoaded: input.topics.length,
+        temporallyEligibleTopics: temporalTopics.length,
         matchableTopics: matchableTopics.length,
+        observedAt: input.observedAt.toISOString(),
+        activeTopicWindowMs: this.activeTopicWindowMs,
         bestTopic: best
           ? {
               id: best.topic.id,
@@ -200,6 +217,16 @@ function scoreTopic(topic: TrendTopic, candidateText: string, candidateSymbol: s
       multiplier: round(multiplier)
     }
   };
+}
+
+function isTemporallyEligibleTrendTopic(
+  topic: TrendTopic,
+  observedAt: Date,
+  options: { activeTopicWindowMs: number | null; requireTopicFirstSeenBeforeObservedAt: boolean }
+): boolean {
+  if (options.requireTopicFirstSeenBeforeObservedAt && topic.firstSeen.getTime() > observedAt.getTime()) return false;
+  if (options.activeTopicWindowMs === null) return true;
+  return topic.lastSeen.getTime() >= observedAt.getTime() - options.activeTopicWindowMs;
 }
 
 function buildCandidateTextParts(input: Parameters<MemeMatcher["match"]>[0]): CandidateTextParts {

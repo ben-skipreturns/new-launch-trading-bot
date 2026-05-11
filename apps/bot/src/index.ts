@@ -26,6 +26,8 @@ import {
   TradingPipeline,
   generateDailyReport,
   generateMemeReport,
+  matcherCalibrationFixtures,
+  runMatcherCalibration,
   type Enricher,
   type LaunchFeed,
   type Store,
@@ -179,7 +181,7 @@ program
       const observedAt = new Date();
       const topics = await listTopicsForMatching(store, options.fixtureTopics, observedAt);
       const launch = buildLocalTokenLaunch(options, observedAt);
-      const match = await new TokenMemeMatcher({ minScore }).match({ launch, topics, observedAt });
+      const match = await createTokenMemeMatcher(minScore, options.fixtureTopics).match({ launch, topics, observedAt });
 
       if (options.persist) {
         await store.upsertTokenLaunch(launch);
@@ -232,7 +234,7 @@ program
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
         .slice(0, limit);
 
-      const matcher = new TokenMemeMatcher({ minScore });
+      const matcher = createTokenMemeMatcher(minScore, options.fixtureTopics);
       let skippedExisting = 0;
       let matched = 0;
       let passed = 0;
@@ -323,6 +325,23 @@ program
     } finally {
       await closeStore(store);
     }
+  });
+
+program
+  .command("match-calibration")
+  .description("Run deterministic token matcher calibration fixtures and write a Markdown report.")
+  .option("--report <path>", "Report path", "reports/matcher-calibration.md")
+  .option("--min-score <score>", "Meme relevance threshold", "0.7")
+  .option("--fail-on-mismatch", "Exit non-zero if any calibration fixture fails its expected outcome", false)
+  .action(async (options: { report: string; minScore: string; failOnMismatch: boolean }) => {
+    const minScore = parseNumberOption(options.minScore, "--min-score");
+    const run = await runMatcherCalibration(matcherCalibrationFixtures, { minScore });
+    await writeText(options.report, formatMatcherCalibrationReport(run));
+    console.log(
+      `Matcher calibration complete: ${run.summary.passedExpectations}/${run.summary.total} expectations passed, ${run.summary.failedExpectations} failed.`
+    );
+    console.log(`Report written to ${resolve(options.report)}.`);
+    if (options.failOnMismatch && run.summary.failedExpectations > 0) process.exitCode = 1;
   });
 
 program
@@ -512,7 +531,7 @@ async function runMatchStream(
     await refreshTrends(store, liveTrendSources(store));
   }
   const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
-  const matcher = new TokenMemeMatcher({ minScore: parseNumberOption(options.minScore, "--min-score") });
+  const matcher = createTokenMemeMatcher(parseNumberOption(options.minScore, "--min-score"), options.fixtureTopics);
   const metadataTimeoutMs = parsePositiveIntegerOption(options.metadataTimeoutMs, "--metadata-timeout-ms");
   const maxLaunches = parsePositiveIntegerOption(options.maxLaunches, "--max-launches");
   let events = 0;
@@ -640,6 +659,47 @@ function printPersistedLaunchMatch(launch: TokenLaunch, match: Awaited<ReturnTyp
   );
 }
 
+function formatMatcherCalibrationReport(run: Awaited<ReturnType<typeof runMatcherCalibration>>): string {
+  const lines = [
+    "# Matcher Calibration",
+    "",
+    `Generated: ${new Date().toISOString()}`,
+    "",
+    "## Summary",
+    "",
+    `- Total fixtures: ${run.summary.total}`,
+    `- Expected passes: ${run.summary.expectedPasses}`,
+    `- Expected rejects: ${run.summary.expectedRejects}`,
+    `- Passed expectations: ${run.summary.passedExpectations}`,
+    `- Failed expectations: ${run.summary.failedExpectations}`,
+    "",
+    "## Fixtures",
+    "",
+    "| Result | Expected | Actual | Score | Fixture | Topic | Reject flags |",
+    "| --- | --- | --- | ---: | --- | --- | --- |"
+  ];
+  for (const result of run.results) {
+    const actual = result.match.rejectFlags.length === 0 ? "pass" : "reject";
+    lines.push(
+      [
+        result.passedExpectation ? "ok" : "fail",
+        result.fixture.expected,
+        actual,
+        result.match.memeRelevanceScore.toFixed(3),
+        escapeMarkdownTableCell(result.fixture.id),
+        escapeMarkdownTableCell(result.match.canonicalPhrase ?? "none"),
+        escapeMarkdownTableCell(result.match.rejectFlags.join(", ") || "none")
+      ].join(" | ").replace(/^/, "| ") + " |"
+    );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function escapeMarkdownTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
 async function getMatchingEnrichment(
   store: Store,
   launch: TokenLaunch,
@@ -668,6 +728,13 @@ function hasMetadataEnrichment(enrichment?: TokenEnrichment | null): boolean {
 function formatMatchedTopic(match: Awaited<ReturnType<TokenMemeMatcher["match"]>>): string {
   if (match.memeRelevanceScore <= 0 || !match.canonicalPhrase) return "none";
   return `${match.canonicalPhrase}${match.topicType ? ` (${match.topicType})` : ""}`;
+}
+
+function createTokenMemeMatcher(minScore: number, fixtureTopics = false): TokenMemeMatcher {
+  return new TokenMemeMatcher({
+    minScore,
+    activeTopicWindowMs: fixtureTopics ? null : undefined
+  });
 }
 
 async function listTopicsForMatching(store: Store, fixtureTopics: boolean, observedAt: Date) {

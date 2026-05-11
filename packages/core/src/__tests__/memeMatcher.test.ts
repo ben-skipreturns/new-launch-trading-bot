@@ -126,6 +126,55 @@ describe("TokenMemeMatcher", () => {
     expect(match.rejectFlags).toContain("NO_MATCHABLE_TOPICS");
     expect(match.rejectFlags).toContain("MEME_RELEVANCE_TOO_LOW");
   });
+
+  it("does not match topics first seen after the token match timestamp", async () => {
+    const match = await new TokenMemeMatcher().match({
+      launch: launch("FUTURE", "Future Banana"),
+      topics: [
+        {
+          ...openAiTopic({
+            canonicalPhrase: "future banana",
+            aliases: ["future banana", "future", "banana"],
+            sourceCoverage: 3,
+            memeabilityScore: 0.9,
+            tokenizationLikelihood: 0.8,
+            riskFlags: []
+          }),
+          firstSeen: new Date("2026-05-08T12:05:00.000Z"),
+          lastSeen: new Date("2026-05-08T12:10:00.000Z")
+        }
+      ],
+      observedAt
+    });
+
+    expect(match.memeRelevanceScore).toBe(0);
+    expect(match.rejectFlags).toContain("NO_TEMPORALLY_MATCHABLE_TOPICS");
+    expect(match.rejectFlags).toContain("MEME_RELEVANCE_TOO_LOW");
+  });
+
+  it("rejects stale topics outside the active topic window", async () => {
+    const match = await new TokenMemeMatcher({ activeTopicWindowMs: 60 * 60 * 1000 }).match({
+      launch: launch("MOODENG", "Moo Deng"),
+      topics: [
+        {
+          ...openAiTopic({
+            canonicalPhrase: "moo deng baby hippo",
+            aliases: ["moo deng baby hippo", "moo deng", "moodeng"],
+            sourceCoverage: 3,
+            memeabilityScore: 0.9,
+            tokenizationLikelihood: 0.8,
+            riskFlags: []
+          }),
+          firstSeen: new Date("2026-05-08T08:00:00.000Z"),
+          lastSeen: new Date("2026-05-08T10:30:00.000Z")
+        }
+      ],
+      observedAt
+    });
+
+    expect(match.memeRelevanceScore).toBe(0);
+    expect(match.rejectFlags).toContain("NO_TEMPORALLY_MATCHABLE_TOPICS");
+  });
 });
 
 function observation(phrase: string, traffic: number): TrendObservation {

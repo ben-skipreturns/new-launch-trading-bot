@@ -1010,6 +1010,7 @@ function matcherDiagnosticsFromRow(row: TokenMemeMatchRow): MatcherDiagnostics {
       value: typeof value === "number" ? value.toFixed(3) : String(value)
     })),
     topicsLoaded: numberValue(raw.topicsLoaded),
+    temporallyEligibleTopics: numberValue(raw.temporallyEligibleTopics),
     matchableTopics: numberValue(raw.matchableTopics),
     metadataStatus: metadata.status,
     metadataFailureReason: metadata.failureReason,

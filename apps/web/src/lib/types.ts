@@ -209,6 +209,7 @@ export interface MatcherDiagnostics {
   matchedAliases: Array<{ alias: string; reason: string; strength?: number }>;
   scoreComponents: Array<{ label: string; value: string }>;
   topicsLoaded?: number;
+  temporallyEligibleTopics?: number;
   matchableTopics?: number;
   metadataStatus?: string;
   metadataFailureReason?: string;

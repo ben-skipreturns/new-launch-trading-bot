@@ -16,6 +16,7 @@
     "lint": "npm run check",
     "migrate": "node --import tsx apps/bot/src/index.ts migrate",
     "meme-report": "node --import tsx apps/bot/src/index.ts meme-report",
+    "match:calibration": "node --import tsx apps/bot/src/index.ts match-calibration",
     "match:launches": "node --import tsx apps/bot/src/index.ts match-launches",
     "match:stream": "node --import tsx apps/bot/src/index.ts match-stream",
     "match:token": "node --import tsx apps/bot/src/index.ts match-token",

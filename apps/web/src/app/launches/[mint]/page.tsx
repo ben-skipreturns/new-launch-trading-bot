@@ -246,7 +246,10 @@ function MatcherDiagnosticsPanel({ diagnostics }: { diagnostics?: MatcherDiagnos
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Matcher diagnostics</h2>
-            <div className="mt-1 text-sm text-muted">Matched {formatAge(diagnostics.observedAt)} against {diagnostics.matchableTopics ?? 0}/{diagnostics.topicsLoaded ?? 0} active topics.</div>
+            <div className="mt-1 text-sm text-muted">
+              Matched {formatAge(diagnostics.observedAt)} against {diagnostics.matchableTopics ?? 0}/{diagnostics.temporallyEligibleTopics ?? 0}/
+              {diagnostics.topicsLoaded ?? 0} matchable, temporal, loaded topics.
+            </div>
           </div>
           <StatusBadge label={diagnostics.metadataStatus ?? "metadata unknown"} tone={diagnostics.metadataStatus === "failed" ? "reject" : "neutral"} />
         </div>

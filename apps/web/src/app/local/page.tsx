@@ -53,6 +53,7 @@ const launchStreamLoop = [
 ];
 
 const tokenMatchLoop = [
+  "npm run match:calibration",
   'npm run match:token -- --fixture-topics --name "Moo Deng" --symbol MOODENG',
   "npm run stream:test -- --source fixture --max-launches 10 --persist",
   "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000 --skip-metadata --dry-run",
@@ -317,6 +318,7 @@ export default function LocalLoopPage() {
                 <CommandRow command="npm run match:launches" writes="Yes" purpose="Matches persisted token launches, fetches token metadata, and writes token_meme_matches for command-center inspection." />
                 <CommandRow command="npm run match:stream -- --dry-run" writes="No" purpose="Streams launches through metadata fetch and matching without writing rows." />
                 <CommandRow command="npm run match:stream" writes="Yes" purpose="Streams launches, writes raw creates, token launches, metadata enrichments, and token_meme_matches only." />
+                <CommandRow command="npm run match:calibration" writes="No" purpose="Runs deterministic matcher pass/reject fixtures and writes reports/matcher-calibration.md." />
                 <CommandRow command="/calibration" writes="No" purpose="Command-center page for reviewing highest-scoring rejects, weakest passes, copycat rejects, metadata failures, and near misses." />
                 <CommandRow command={'npm run match:token -- --name "..." --symbol "..."'} writes="Optional" purpose="Tests token text against active or fixture topics; add --persist to store the local match." />
                 <CommandRow command="npm run retention:launch-dry-run" writes="No" purpose="Counts expired raw/trade events and uninteresting token launches without deleting them." />
