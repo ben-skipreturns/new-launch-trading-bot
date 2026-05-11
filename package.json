@@ -16,6 +16,7 @@
     "lint": "npm run check",
     "migrate": "node --import tsx apps/bot/src/index.ts migrate",
     "meme-report": "node --import tsx apps/bot/src/index.ts meme-report",
+    "match:launches": "node --import tsx apps/bot/src/index.ts match-launches",
     "match:token": "node --import tsx apps/bot/src/index.ts match-token",
     "replay:fixture": "node --import tsx apps/bot/src/index.ts replay --fixture fixtures/pumpapi-events.jsonl --report reports/replay.md",
     "retention:launch-dry-run": "node --import tsx apps/bot/src/index.ts retention-prune --prune-launches --dry-run",

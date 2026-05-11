@@ -54,7 +54,13 @@ const launchStreamLoop = [
 
 const tokenMatchLoop = [
   'npm run match:token -- --fixture-topics --name "Moo Deng" --symbol MOODENG',
+  "npm run stream:test -- --source fixture --max-launches 10 --persist",
+  "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000 --dry-run",
+  "npm run match:launches -- --fixture-topics --limit 10 --since-hours 24000",
   "npm run start --workspace @moonshot/bot -- trend-refresh",
+  "npm run stream:test -- --source pumpapi --duration-seconds 60 --max-launches 10 --persist",
+  "npm run match:launches -- --limit 25 --since-hours 72 --dry-run",
+  "npm run match:launches -- --limit 25 --since-hours 72",
   'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>"',
   'npm run match:token -- --name "<token name>" --symbol "<SYMBOL>" --persist'
 ];
@@ -134,6 +140,10 @@ const troubleshooting = [
   {
     issue: "match-token returns NO_MATCHABLE_TOPICS",
     fix: "The active radar topics were too weak or risky for matching. Inspect Radar Review, run another trend-refresh later, or use --fixture-topics to test matcher mechanics."
+  },
+  {
+    issue: "match-launches finds no launches",
+    fix: "Run npm run stream:test with --persist first, or increase --since-hours if you are matching older fixture data."
   },
   {
     issue: "match-token says DATABASE_URL is required",
@@ -235,10 +245,10 @@ export default function LocalLoopPage() {
           <div>
             <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Token matching loop</h2>
             <p className="mt-3 text-sm leading-6 text-muted">
-              Use this before live ingestion. The fixture command proves the matcher mechanics without OpenAI or Postgres writes. The live-topic command checks a proposed token against the current radar topics already stored in your local database.
+              Use this after the launch stream loop. The single-token command proves matcher mechanics, while match-launches runs the same matcher across persisted stream launches.
             </p>
             <p className="mt-3 text-sm leading-6 text-muted">
-              Add --persist only when you want the local test match to appear in database inspection queries and command-center pages.
+              Run match-launches with --dry-run first. Drop --dry-run when you want the results written to token_meme_matches and visible in the command center.
             </p>
           </div>
           <PreBlock lines={tokenMatchLoop} />
@@ -291,6 +301,8 @@ export default function LocalLoopPage() {
                 <CommandRow command="npm run replay:fixture" writes="Yes" purpose="Replays fixtures into Postgres and writes reports/replay.md." />
                 <CommandRow command="npm run start --workspace @moonshot/bot -- trend-refresh" writes="Yes" purpose="Runs the OpenAI meme radar and writes topics, observations, and refresh audit rows." />
                 <CommandRow command="npm run stream:test -- --source pumpapi" writes="Optional" purpose="Prints live token create events; add --persist to store only raw creates and token launches." />
+                <CommandRow command="npm run match:launches -- --dry-run" writes="No" purpose="Matches persisted token launches against active topics without writing token_meme_matches." />
+                <CommandRow command="npm run match:launches" writes="Yes" purpose="Matches persisted token launches and writes token_meme_matches for command-center inspection." />
                 <CommandRow command={'npm run match:token -- --name "..." --symbol "..."'} writes="Optional" purpose="Tests token text against active or fixture topics; add --persist to store the local match." />
                 <CommandRow command="npm run retention:launch-dry-run" writes="No" purpose="Counts expired raw/trade events and uninteresting token launches without deleting them." />
                 <CommandRow command="npm run migrate" writes="Yes" purpose="Applies SQL schema migrations to the configured database." />

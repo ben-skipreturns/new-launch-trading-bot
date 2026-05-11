@@ -176,8 +176,7 @@ program
       if (options.fixtureTopics) await refreshTrends(store, fixtureTrendSources());
 
       const observedAt = new Date();
-      const activeSince = new Date(observedAt.getTime() - 48 * 60 * 60 * 1000);
-      const topics = await store.listTrendTopics(activeSince, 500);
+      const topics = await listTopicsForMatching(store, options.fixtureTopics, observedAt);
       const launch = buildLocalTokenLaunch(options, observedAt);
       const match = await new TokenMemeMatcher({ minScore }).match({ launch, topics, observedAt });
 
@@ -194,6 +193,72 @@ program
         launch,
         match
       });
+    } finally {
+      await closeStore(store);
+    }
+  });
+
+program
+  .command("match-launches")
+  .description("Run meme matching for persisted token_launches without enrichment, scoring, or paper trading.")
+  .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
+  .option("--limit <count>", "Max persisted launches to inspect", "100")
+  .option("--since-hours <hours>", "Only inspect launches created in the last N hours", "72")
+  .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
+  .option("--include-existing", "Re-match launches that already have a token_meme_match", false)
+  .option("--dry-run", "Print match results without writing token_meme_matches", false)
+  .option("--min-score <score>", "Meme relevance threshold", "0.7")
+  .action(async (options: MatchLaunchesOptions) => {
+    if (!options.databaseUrl) throw new Error("DATABASE_URL is required for match-launches.");
+
+    const limit = parsePositiveIntegerOption(options.limit, "--limit");
+    const sinceHours = parsePositiveNumberOption(options.sinceHours, "--since-hours");
+    const minScore = parseNumberOption(options.minScore, "--min-score");
+    const store = createStore(options.databaseUrl);
+
+    try {
+      const observedAt = new Date();
+      const topicStore = options.fixtureTopics && options.dryRun ? new MemoryStore() : store;
+      if (options.fixtureTopics) await refreshTrends(topicStore, fixtureTrendSources());
+
+      const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
+      const since = new Date(observedAt.getTime() - sinceHours * 60 * 60 * 1000);
+      const launches = (await store.listTokenLaunches())
+        .filter((launch) => launch.createdAt >= since)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, limit);
+
+      const matcher = new TokenMemeMatcher({ minScore });
+      let skippedExisting = 0;
+      let matched = 0;
+      let passed = 0;
+      let rejected = 0;
+
+      for (const launch of launches) {
+        const existing = await store.getLatestTokenMemeMatch(launch.mint);
+        if (existing && !options.includeExisting) {
+          skippedExisting += 1;
+          continue;
+        }
+
+        const match = await matcher.match({ launch, topics, observedAt });
+        matched += 1;
+        if (match.rejectFlags.length === 0) passed += 1;
+        else rejected += 1;
+
+        if (!options.dryRun) await store.upsertTokenMemeMatch(match);
+        printPersistedLaunchMatch(launch, match);
+      }
+
+      console.log(
+        `Launch matching complete: ${matched} matched (${passed} pass, ${rejected} reject), ${skippedExisting} skipped existing, ${topics.length} topics loaded, persisted=${options.dryRun ? "no" : "yes"}.`
+      );
+      if (launches.length === 0) {
+        console.log("No persisted launches were found in the requested window. Run stream-test with --persist first, or increase --since-hours.");
+      }
+      if (topics.length === 0) {
+        console.log("No topics were available. Run trend-refresh first, or use --fixture-topics for a deterministic local check.");
+      }
     } finally {
       await closeStore(store);
     }
@@ -320,6 +385,16 @@ interface MatchTokenOptions {
   minScore: string;
 }
 
+interface MatchLaunchesOptions {
+  databaseUrl?: string;
+  limit: string;
+  sinceHours: string;
+  fixtureTopics: boolean;
+  includeExisting: boolean;
+  dryRun: boolean;
+  minScore: string;
+}
+
 interface StreamTestOptions {
   source: string;
   fixture: string;
@@ -418,7 +493,7 @@ function printTokenMatchResult(input: {
   console.log(`Topic source: ${input.source}`);
   console.log(`Topics loaded: ${input.topicsLoaded}`);
   console.log(`Meme relevance: ${input.match.memeRelevanceScore.toFixed(3)} / threshold ${input.minScore.toFixed(3)} -> ${status}`);
-  console.log(`Matched topic: ${input.match.canonicalPhrase ?? "none"}${input.match.topicType ? ` (${input.match.topicType})` : ""}`);
+  console.log(`Matched topic: ${formatMatchedTopic(input.match)}`);
   console.log(`Reasons: ${input.match.reasons.length > 0 ? input.match.reasons.join(", ") : "none"}`);
   console.log(`Reject flags: ${input.match.rejectFlags.length > 0 ? input.match.rejectFlags.join(", ") : "none"}`);
   console.log(`Evidence: ${input.match.evidenceUrls.length > 0 ? input.match.evidenceUrls.join(", ") : "none"}`);
@@ -426,6 +501,33 @@ function printTokenMatchResult(input: {
   if (input.topicsLoaded === 0) {
     console.log("No active topics were available. Run trend-refresh first or use --fixture-topics for a deterministic local check.");
   }
+}
+
+function printPersistedLaunchMatch(launch: TokenLaunch, match: Awaited<ReturnType<TokenMemeMatcher["match"]>>): void {
+  const status = match.rejectFlags.length === 0 ? "PASS" : "REJECT";
+  console.log(
+    [
+      `[${status}]`,
+      launch.name ?? "-",
+      `(${launch.symbol ?? "-"})`,
+      `mint=${launch.mint}`,
+      `score=${match.memeRelevanceScore.toFixed(3)}`,
+      `topic=${formatMatchedTopic(match)}`,
+      `reasons=${match.reasons.length > 0 ? match.reasons.join("|") : "none"}`,
+      `rejects=${match.rejectFlags.length > 0 ? match.rejectFlags.join("|") : "none"}`
+    ].join(" ")
+  );
+}
+
+function formatMatchedTopic(match: Awaited<ReturnType<TokenMemeMatcher["match"]>>): string {
+  if (match.memeRelevanceScore <= 0 || !match.canonicalPhrase) return "none";
+  return `${match.canonicalPhrase}${match.topicType ? ` (${match.topicType})` : ""}`;
+}
+
+async function listTopicsForMatching(store: Store, fixtureTopics: boolean, observedAt: Date) {
+  if (fixtureTopics) return store.listTrendTopics(undefined, 500);
+  const activeSince = new Date(observedAt.getTime() - 48 * 60 * 60 * 1000);
+  return store.listTrendTopics(activeSince, 500);
 }
 
 function parseNumberOption(value: string, name: string): number {
