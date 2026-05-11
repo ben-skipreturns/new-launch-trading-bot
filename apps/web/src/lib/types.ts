@@ -123,6 +123,8 @@ export interface RawLaunchPage {
   items: RawLaunchListItem[];
   total: number;
   stats: RawLaunchStats;
+  streamHealth: StreamHealthListItem[];
+  sources: string[];
   page: number;
   pageSize: number;
   totalPages: number;
@@ -136,6 +138,30 @@ export interface RawLaunchStats {
   matched: number;
   scored: number;
   latestCreatedAt?: Date;
+}
+
+export type RawLaunchStatusFilter = "all" | "raw" | "matched" | "scored";
+
+export interface RawLaunchFilters {
+  status: RawLaunchStatusFilter;
+  source?: string;
+  hours?: number;
+}
+
+export interface StreamHealthListItem {
+  id: string;
+  source: string;
+  startedAt: Date;
+  connectedAt?: Date;
+  disconnectedAt?: Date;
+  lastEventAt?: Date;
+  status: string;
+  eventsRead: number;
+  launchesRead: number;
+  duplicateLaunches: number;
+  reconnects: number;
+  staleWarnings: number;
+  errorText?: string;
 }
 
 export interface PositionListItem {

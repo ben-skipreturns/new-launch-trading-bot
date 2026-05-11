@@ -6,17 +6,39 @@ import { MetricCard } from "../../components/metric-card";
 import { StatusBadge } from "../../components/status-badge";
 import { getRawLaunchPage } from "../../lib/data";
 import { formatAge, formatDate, formatSol, shortMint } from "../../lib/format";
-import type { RawLaunchListItem } from "../../lib/types";
+import type { RawLaunchListItem, RawLaunchStatusFilter, StreamHealthListItem } from "../../lib/types";
 
 export const dynamic = "force-dynamic";
 
 const pageSizes = [25, 50, 100];
+const statusFilters: Array<{ label: string; value: RawLaunchStatusFilter }> = [
+  { label: "All", value: "all" },
+  { label: "Raw", value: "raw" },
+  { label: "Matched", value: "matched" },
+  { label: "Scored", value: "scored" }
+];
+const hourFilters = [
+  { label: "1h", value: "1" },
+  { label: "6h", value: "6" },
+  { label: "24h", value: "24" },
+  { label: "7d", value: "168" },
+  { label: "All", value: "" }
+];
 
-export default async function StreamPage({ searchParams }: { searchParams?: Promise<{ page?: string; pageSize?: string }> }) {
+export default async function StreamPage({
+  searchParams
+}: {
+  searchParams?: Promise<{ page?: string; pageSize?: string; status?: string; source?: string; hours?: string }>;
+}) {
   const params = await searchParams;
   const page = parsePositiveInt(params?.page, 1);
   const pageSize = pageSizes.includes(parsePositiveInt(params?.pageSize, 25)) ? parsePositiveInt(params?.pageSize, 25) : 25;
-  const launches = await getRawLaunchPage(page, pageSize);
+  const status = parseStatusFilter(params?.status);
+  const source = params?.source?.trim() || undefined;
+  const hours = params?.hours ? parsePositiveInt(params.hours, 0) || undefined : undefined;
+  const launches = await getRawLaunchPage(page, pageSize, { status, source, hours });
+  const href = (updates: Record<string, string | number | undefined>) =>
+    streamHref({ page, pageSize, status, source, hours: hours ? String(hours) : undefined }, updates);
 
   return (
     <div className="page-wrap space-y-5">
@@ -34,7 +56,7 @@ export default async function StreamPage({ searchParams }: { searchParams?: Prom
               className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${
                 launches.data.pageSize === size ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"
               }`}
-              href={`/stream?page=1&pageSize=${size}`}
+              href={href({ page: 1, pageSize: size })}
               key={size}
             >
               {size}
@@ -44,6 +66,60 @@ export default async function StreamPage({ searchParams }: { searchParams?: Prom
       </header>
 
       <ErrorPanel message={launches.ok ? undefined : launches.error} />
+
+      <section className="panel rounded-md p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="theme-control flex rounded-lg p-1">
+            {statusFilters.map((filter) => (
+              <Link
+                className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${
+                  status === filter.value ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"
+                }`}
+                href={href({ page: 1, status: filter.value })}
+                key={filter.value}
+              >
+                {filter.label}
+              </Link>
+            ))}
+          </div>
+          <div className="theme-control flex rounded-lg p-1">
+            {hourFilters.map((filter) => (
+              <Link
+                className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${
+                  String(hours ?? "") === filter.value ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"
+                }`}
+                href={href({ page: 1, hours: filter.value || undefined })}
+                key={filter.label}
+              >
+                {filter.label}
+              </Link>
+            ))}
+          </div>
+          {launches.data.sources.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Link
+                className={`rounded-md border border-line px-3 py-1.5 text-sm font-semibold transition ${
+                  !source ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"
+                }`}
+                href={href({ page: 1, source: undefined })}
+              >
+                All sources
+              </Link>
+              {launches.data.sources.map((item) => (
+                <Link
+                  className={`rounded-md border border-line px-3 py-1.5 text-sm font-semibold transition ${
+                    source === item ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"
+                  }`}
+                  href={href({ page: 1, source: item })}
+                  key={item}
+                >
+                  {item}
+                </Link>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </section>
 
       <section className="grid grid-cols-5 gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-2 max-[520px]:grid-cols-1">
         <MetricCard title="Total launches" value={formatCompact(launches.data.stats.total)} detail="Persisted create events" tone="accent" />
@@ -56,6 +132,14 @@ export default async function StreamPage({ searchParams }: { searchParams?: Prom
           detail={formatDate(launches.data.stats.latestCreatedAt)}
         />
       </section>
+
+      {launches.data.streamHealth.length > 0 ? (
+        <section className="grid grid-cols-5 gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-2 max-[520px]:grid-cols-1">
+          {launches.data.streamHealth.slice(0, 5).map((run) => (
+            <StreamHealthCard key={run.id} run={run} />
+          ))}
+        </section>
+      ) : null}
 
       <section className="panel overflow-hidden rounded-md">
         {launches.data.items.length ? (
@@ -93,10 +177,10 @@ export default async function StreamPage({ searchParams }: { searchParams?: Prom
           {Math.min(launches.data.page * launches.data.pageSize, launches.data.total)} of {launches.data.total}
         </div>
         <div className="flex gap-2">
-          <PageLink disabled={!launches.data.hasPrevious} href={`/stream?page=${Math.max(1, launches.data.page - 1)}&pageSize=${launches.data.pageSize}`}>
+          <PageLink disabled={!launches.data.hasPrevious} href={href({ page: Math.max(1, launches.data.page - 1) })}>
             Previous
           </PageLink>
-          <PageLink disabled={!launches.data.hasNext} href={`/stream?page=${launches.data.page + 1}&pageSize=${launches.data.pageSize}`}>
+          <PageLink disabled={!launches.data.hasNext} href={href({ page: launches.data.page + 1 })}>
             Next
           </PageLink>
         </div>
@@ -143,6 +227,38 @@ function StreamRow({ launch }: { launch: RawLaunchListItem }) {
   );
 }
 
+function StreamHealthCard({ run }: { run: StreamHealthListItem }) {
+  const tone = run.status === "completed" ? "buy" : run.status === "running" ? "watch" : run.status === "error" || run.status === "stale" ? "reject" : undefined;
+  return (
+    <div className="panel rounded-md p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">{run.source}</div>
+          <div className="mt-1 text-lg font-semibold text-ink">{formatAge(run.startedAt)}</div>
+        </div>
+        <StatusBadge label={run.status} tone={tone} />
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+        <HealthMetric label="Events" value={formatCompact(run.eventsRead)} />
+        <HealthMetric label="Launches" value={formatCompact(run.launchesRead)} />
+        <HealthMetric label="Dupes" value={formatCompact(run.duplicateLaunches)} />
+        <HealthMetric label="Reconnects" value={formatCompact(run.reconnects)} />
+      </div>
+      <div className="mt-3 text-xs text-muted">Last event {run.lastEventAt ? formatAge(run.lastEventAt) : "-"}</div>
+      {run.errorText ? <div className="mt-2 line-clamp-2 text-xs text-reject">{run.errorText}</div> : null}
+    </div>
+  );
+}
+
+function HealthMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-line bg-panel-muted/70 px-2.5 py-2">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">{label}</div>
+      <div className="mt-0.5 font-semibold text-ink">{value}</div>
+    </div>
+  );
+}
+
 function PageLink({ children, disabled, href }: { children: React.ReactNode; disabled: boolean; href: string }) {
   if (disabled) {
     return (
@@ -156,6 +272,25 @@ function PageLink({ children, disabled, href }: { children: React.ReactNode; dis
       {children}
     </Link>
   );
+}
+
+function parseStatusFilter(value: string | undefined): RawLaunchStatusFilter {
+  return value === "raw" || value === "matched" || value === "scored" ? value : "all";
+}
+
+function streamHref(
+  current: { page: number; pageSize: number; status: RawLaunchStatusFilter; source?: string; hours?: string },
+  updates: Record<string, string | number | undefined>
+): string {
+  const next = new URLSearchParams();
+  const merged = { ...current, ...updates };
+  if (merged.page && Number(merged.page) > 1) next.set("page", String(merged.page));
+  if (merged.pageSize && Number(merged.pageSize) !== 25) next.set("pageSize", String(merged.pageSize));
+  if (merged.status && merged.status !== "all") next.set("status", String(merged.status));
+  if (merged.source) next.set("source", String(merged.source));
+  if (merged.hours) next.set("hours", String(merged.hours));
+  const suffix = next.toString();
+  return suffix ? `/stream?${suffix}` : "/stream";
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {

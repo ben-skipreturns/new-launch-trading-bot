@@ -15,9 +15,12 @@ import type {
   MatcherCalibrationItem,
   MatcherCalibrationReport,
   MatcherDiagnostics,
+  RawLaunchFilters,
   RawLaunchListItem,
   RawLaunchPage,
   RawLaunchStats,
+  RawLaunchStatusFilter,
+  StreamHealthListItem,
   TopicListItem,
   TrendRadarHealth,
   LaunchListItem
@@ -68,10 +71,13 @@ export async function getLaunchList(sort: "latest" | "meme" | "risk" | "ev" = "l
   });
 }
 
-export async function getRawLaunchPage(page = 1, pageSize = 25): Promise<DataState<RawLaunchPage>> {
+export async function getRawLaunchPage(page = 1, pageSize = 25, filters: Partial<RawLaunchFilters> = {}): Promise<DataState<RawLaunchPage>> {
   const normalizedPage = Math.max(1, Math.floor(page));
   const normalizedPageSize = Math.min(100, Math.max(10, Math.floor(pageSize)));
-  return safeRead(emptyRawLaunchPage(normalizedPage, normalizedPageSize), () => getRawLaunches(normalizedPage, normalizedPageSize));
+  const normalizedFilters = normalizeRawLaunchFilters(filters);
+  return safeRead(emptyRawLaunchPage(normalizedPage, normalizedPageSize), () =>
+    getRawLaunches(normalizedPage, normalizedPageSize, normalizedFilters)
+  );
 }
 
 export async function getTopicList(): Promise<DataState<TopicListItem[]>> {
@@ -269,9 +275,10 @@ async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined
   return rows[0] ? launchFromDetailRow(rows[0]) : undefined;
 }
 
-async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunchPage> {
+async function getRawLaunches(page: number, pageSize: number, filters: RawLaunchFilters): Promise<RawLaunchPage> {
   const offset = (page - 1) * pageSize;
-  const [rows, statsRows] = await Promise.all([
+  const where = buildRawLaunchWhere(filters);
+  const [rows, statsRows, sourceRows, streamHealth] = await Promise.all([
     query<RawLaunchRow>(
       `select
          tl.mint,
@@ -291,9 +298,10 @@ async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunch
          exists(select 1 from token_meme_matches m where m.mint = tl.mint) as has_meme_match,
          exists(select 1 from score_snapshots s where s.mint = tl.mint) as has_score
        from token_launches tl
+       ${where.sql}
        order by tl.created_at desc
-       limit $1 offset $2`,
-      [pageSize, offset]
+       limit $${where.params.length + 1} offset $${where.params.length + 2}`,
+      [...where.params, pageSize, offset]
     ),
     query<RawLaunchStatsRow>(
       `select
@@ -305,8 +313,12 @@ async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunch
          count(*) filter (where exists(select 1 from token_meme_matches m where m.mint = tl.mint))::text as matched_count,
          count(*) filter (where exists(select 1 from score_snapshots s where s.mint = tl.mint))::text as scored_count,
          max(created_at) as latest_created_at
-       from token_launches tl`
-    )
+       from token_launches tl
+       ${where.sql}`,
+      where.params
+    ),
+    query<{ source: string }>(`select distinct source from token_launches order by source`),
+    getStreamHealthRows(5)
   ]);
   const stats = rawLaunchStatsFromRow(statsRows[0]);
   const total = stats.total;
@@ -315,12 +327,54 @@ async function getRawLaunches(page: number, pageSize: number): Promise<RawLaunch
     items: rows.map(rawLaunchFromRow),
     total,
     stats,
+    streamHealth,
+    sources: sourceRows.map((row) => row.source),
     page,
     pageSize,
     totalPages,
     hasPrevious: page > 1,
     hasNext: offset + rows.length < total
   };
+}
+
+function normalizeRawLaunchFilters(filters: Partial<RawLaunchFilters>): RawLaunchFilters {
+  const status = isRawLaunchStatusFilter(filters.status) ? filters.status : "all";
+  const source = filters.source?.trim() || undefined;
+  const hours = typeof filters.hours === "number" && Number.isFinite(filters.hours) && filters.hours > 0 ? Math.min(filters.hours, 24 * 30) : undefined;
+  return { status, source, hours };
+}
+
+function buildRawLaunchWhere(filters: RawLaunchFilters): { sql: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (filters.source) {
+    params.push(filters.source);
+    clauses.push(`tl.source = $${params.length}`);
+  }
+  if (filters.hours) {
+    params.push(new Date(Date.now() - filters.hours * 60 * 60 * 1000));
+    clauses.push(`tl.created_at >= $${params.length}`);
+  }
+  if (filters.status === "raw") {
+    clauses.push("not exists(select 1 from token_meme_matches m where m.mint = tl.mint)");
+    clauses.push("not exists(select 1 from score_snapshots s where s.mint = tl.mint)");
+  }
+  if (filters.status === "matched") clauses.push("exists(select 1 from token_meme_matches m where m.mint = tl.mint)");
+  if (filters.status === "scored") clauses.push("exists(select 1 from score_snapshots s where s.mint = tl.mint)");
+  return {
+    sql: clauses.length > 0 ? `where ${clauses.join(" and ")}` : "",
+    params
+  };
+}
+
+function isRawLaunchStatusFilter(value: unknown): value is RawLaunchStatusFilter {
+  return value === "all" || value === "raw" || value === "matched" || value === "scored";
+}
+
+async function getStreamHealthRows(limit: number): Promise<StreamHealthListItem[]> {
+  if (!(await tableExists("stream_health_runs"))) return [];
+  const rows = await query<StreamHealthRow>(`select * from stream_health_runs order by started_at desc limit $1`, [limit]);
+  return rows.map(streamHealthFromRow);
 }
 
 async function getPositions(limit = 50): Promise<PositionListItem[]> {
@@ -535,6 +589,8 @@ function emptyRawLaunchPage(page: number, pageSize: number): RawLaunchPage {
       matched: 0,
       scored: 0
     },
+    streamHealth: [],
+    sources: [],
     page,
     pageSize,
     totalPages: 1,
@@ -621,6 +677,22 @@ interface RawLaunchStatsRow {
   matched_count: string;
   scored_count: string;
   latest_created_at: Date | null;
+}
+
+interface StreamHealthRow {
+  id: string;
+  source: string;
+  started_at: Date;
+  connected_at: Date | null;
+  disconnected_at: Date | null;
+  last_event_at: Date | null;
+  status: string;
+  events_read: number;
+  launches_read: number;
+  duplicate_launches: number;
+  reconnects: number;
+  stale_warnings: number;
+  error_text: string | null;
 }
 
 interface PositionRow {
@@ -799,6 +871,24 @@ function rawLaunchStatsFromRow(row: RawLaunchStatsRow | undefined): RawLaunchSta
     matched: Number(row?.matched_count ?? 0),
     scored: Number(row?.scored_count ?? 0),
     latestCreatedAt: row?.latest_created_at ?? undefined
+  };
+}
+
+function streamHealthFromRow(row: StreamHealthRow): StreamHealthListItem {
+  return {
+    id: row.id,
+    source: row.source,
+    startedAt: row.started_at,
+    connectedAt: row.connected_at ?? undefined,
+    disconnectedAt: row.disconnected_at ?? undefined,
+    lastEventAt: row.last_event_at ?? undefined,
+    status: row.status,
+    eventsRead: row.events_read,
+    launchesRead: row.launches_read,
+    duplicateLaunches: row.duplicate_launches,
+    reconnects: row.reconnects,
+    staleWarnings: row.stale_warnings,
+    errorText: row.error_text ?? undefined
   };
 }
 

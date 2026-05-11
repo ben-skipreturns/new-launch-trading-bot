@@ -30,8 +30,13 @@ import {
   matcherCalibrationFixtures,
   runMatcherCalibration,
   type Enricher,
+  type JsonValue,
+  type LaunchEvent,
   type LaunchFeed,
+  type PumpApiStreamStatusEvent,
   type Store,
+  type StreamHealthRun,
+  type StreamHealthStatus,
   type TokenEnrichment,
   type TokenLaunch,
   type TrendObservation,
@@ -117,20 +122,29 @@ program
   .option("--fixture <path>", "JSONL fixture path", "fixtures/pumpapi-events.jsonl")
   .option("--duration-seconds <seconds>", "Stop stream testing after this many seconds", "60")
   .option("--max-launches <count>", "Stop after this many create events", "25")
+  .option("--stale-timeout-seconds <seconds>", "Reconnect PumpApi if no messages arrive for this long", "30")
+  .option("--max-reconnects <count>", "Maximum PumpApi reconnect attempts during this run", "20")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--persist", "Persist only raw create events and token_launches", false)
   .action(async (options: StreamTestOptions) => {
     if (options.persist && !options.databaseUrl) throw new Error("DATABASE_URL is required when using --persist.");
     const store = options.persist ? createStore(options.databaseUrl) : undefined;
+    const health = store ? createStreamHealthRun(options.source) : undefined;
     try {
-      const result = await runLaunchStreamTest(createLaunchFeed(options.source, options.fixture), {
+      if (store && health) await store.upsertStreamHealthRun(health);
+      const result = await runLaunchStreamTest(createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)), {
         durationMs: parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000,
         maxLaunches: parsePositiveIntegerOption(options.maxLaunches, "--max-launches"),
-        store
+        store,
+        health
       });
+      if (store && health) await finishStreamHealthRun(store, health, "completed");
       console.log(
-        `Stream test complete: ${result.events} events read, ${result.launches} launches, ${result.ignoredEvents} non-create events ignored, ${result.persistedLaunches} launches persisted.`
+        `Stream test complete: ${result.events} events read, ${result.launches} launches, ${result.ignoredEvents} non-create events ignored, ${result.persistedLaunches} launches persisted, ${result.duplicateLaunches} duplicates.`
       );
+    } catch (error) {
+      if (store && health) await finishStreamHealthRun(store, health, "error", error);
+      throw error;
     } finally {
       if (store) await closeStore(store);
     }
@@ -284,6 +298,8 @@ program
   .option("--fixture <path>", "JSONL fixture path", "fixtures/pumpapi-events.jsonl")
   .option("--duration-seconds <seconds>", "Stop streaming after this many seconds", "60")
   .option("--max-launches <count>", "Stop after this many create events", "25")
+  .option("--stale-timeout-seconds <seconds>", "Reconnect PumpApi if no messages arrive for this long", "30")
+  .option("--max-reconnects <count>", "Maximum PumpApi reconnect attempts during this run", "20")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
   .option("--refresh-trends", "Refresh trend topics at startup before matching", false)
@@ -297,11 +313,17 @@ program
     }
 
     const store = createStore(options.databaseUrl);
+    const health = !options.dryRun ? createStreamHealthRun(options.source) : undefined;
     try {
-      const result = await runMatchStream(createLaunchFeed(options.source, options.fixture), store, options);
+      if (health) await store.upsertStreamHealthRun(health);
+      const result = await runMatchStream(createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)), store, options, health);
+      if (health) await finishStreamHealthRun(store, health, "completed");
       console.log(
-        `Match stream complete: ${result.events} events read, ${result.launches} launches, ${result.matched} matched (${result.passed} pass, ${result.rejected} reject), ${result.persisted} persisted.`
+        `Match stream complete: ${result.events} events read, ${result.launches} launches, ${result.matched} matched (${result.passed} pass, ${result.rejected} reject), ${result.persisted} persisted, ${result.duplicateLaunches} duplicates.`
       );
+    } catch (error) {
+      if (health) await finishStreamHealthRun(store, health, "error", error);
+      throw error;
     } finally {
       await closeStore(store);
     }
@@ -462,6 +484,8 @@ interface MatchStreamOptions {
   fixture: string;
   durationSeconds: string;
   maxLaunches: string;
+  staleTimeoutSeconds: string;
+  maxReconnects: string;
   databaseUrl?: string;
   fixtureTopics: boolean;
   refreshTrends: boolean;
@@ -476,29 +500,151 @@ interface StreamTestOptions {
   fixture: string;
   durationSeconds: string;
   maxLaunches: string;
+  staleTimeoutSeconds: string;
+  maxReconnects: string;
   databaseUrl?: string;
   persist: boolean;
 }
 
+interface PumpApiFeedCliOptions {
+  staleTimeoutMs?: number;
+  maxReconnects?: number;
+  onStatus?: (event: PumpApiStreamStatusEvent) => void;
+}
+
+function streamFeedOptions(
+  options: Pick<StreamTestOptions | MatchStreamOptions, "staleTimeoutSeconds" | "maxReconnects">,
+  store?: Store,
+  health?: StreamHealthRun
+): PumpApiFeedCliOptions {
+  return {
+    staleTimeoutMs: parsePositiveNumberOption(options.staleTimeoutSeconds, "--stale-timeout-seconds") * 1000,
+    maxReconnects: parsePositiveIntegerOption(options.maxReconnects, "--max-reconnects"),
+    onStatus: health && store ? createStreamStatusHandler(store, health) : undefined
+  };
+}
+
+function createStreamHealthRun(source: string): StreamHealthRun {
+  const startedAt = new Date();
+  return {
+    id: `stream:${source}:${startedAt.toISOString()}:${Math.random().toString(36).slice(2, 8)}`,
+    source,
+    startedAt,
+    status: "running",
+    eventsRead: 0,
+    launchesRead: 0,
+    duplicateLaunches: 0,
+    reconnects: 0,
+    staleWarnings: 0,
+    raw: { statusEvents: [] }
+  };
+}
+
+function createStreamStatusHandler(store: Store, health: StreamHealthRun): (event: PumpApiStreamStatusEvent) => void {
+  return (event) => {
+    if (event.type === "connected") {
+      health.connectedAt ??= event.at;
+      health.status = "running";
+    }
+    if (event.type === "disconnected") health.disconnectedAt = event.at;
+    if (event.type === "reconnecting") health.reconnects += 1;
+    if (event.type === "stale") {
+      health.staleWarnings += 1;
+      health.status = "stale";
+    }
+    if (event.type === "error") {
+      health.errorText = event.errorText;
+      health.status = "error";
+    }
+    if (event.lastEventAt) health.lastEventAt = event.lastEventAt;
+    appendStreamRawStatus(health, event);
+    void store.upsertStreamHealthRun(health).catch(() => undefined);
+  };
+}
+
+async function recordStreamHealthEvent(
+  store: Store | undefined,
+  health: StreamHealthRun | undefined,
+  event: LaunchEvent,
+  duplicateLaunch: boolean
+): Promise<void> {
+  if (!store || !health) return;
+  health.eventsRead += 1;
+  health.lastEventAt = event.timestamp;
+  if (event.tokenLaunch) {
+    health.launchesRead += 1;
+    if (duplicateLaunch) health.duplicateLaunches += 1;
+  }
+  if (health.status === "stale" || health.status === "error") health.status = "running";
+  await store.upsertStreamHealthRun(health);
+}
+
+async function finishStreamHealthRun(
+  store: Store,
+  health: StreamHealthRun,
+  status: Exclude<StreamHealthStatus, "running" | "stale">,
+  error?: unknown
+): Promise<void> {
+  health.status = status;
+  health.disconnectedAt = new Date();
+  if (error) health.errorText = error instanceof Error ? error.message : String(error);
+  await store.upsertStreamHealthRun(health);
+}
+
+async function isDuplicateLaunch(store: Store | undefined, seenLaunches: Set<string>, launch: TokenLaunch): Promise<boolean> {
+  const seen = seenLaunches.has(launch.mint);
+  seenLaunches.add(launch.mint);
+  if (seen) return true;
+  if (!store) return false;
+  return Boolean(await store.getTokenLaunch(launch.mint));
+}
+
+function appendStreamRawStatus(health: StreamHealthRun, event: PumpApiStreamStatusEvent): void {
+  const raw = isJsonRecord(health.raw) ? health.raw : {};
+  const existing = Array.isArray(raw.statusEvents) ? raw.statusEvents : [];
+  const nextEvent: Record<string, JsonValue> = {
+    type: event.type,
+    at: event.at.toISOString()
+  };
+  if (event.attempt !== undefined) nextEvent.attempt = event.attempt;
+  if (event.delayMs !== undefined) nextEvent.delayMs = event.delayMs;
+  if (event.lastEventAt) nextEvent.lastEventAt = event.lastEventAt.toISOString();
+  if (event.errorText) nextEvent.errorText = event.errorText;
+  health.raw = {
+    ...raw,
+    statusEvents: [...existing.slice(-24), nextEvent]
+  };
+}
+
+function isJsonRecord(value: JsonValue): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function runLaunchStreamTest(
   feed: LaunchFeed,
-  options: { durationMs: number; maxLaunches: number; store?: Store }
-): Promise<{ events: number; launches: number; ignoredEvents: number; persistedLaunches: number }> {
+  options: { durationMs: number; maxLaunches: number; store?: Store; health?: StreamHealthRun }
+): Promise<{ events: number; launches: number; ignoredEvents: number; persistedLaunches: number; duplicateLaunches: number }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.durationMs);
+  const seenLaunches = new Set<string>();
   let events = 0;
   let launches = 0;
   let ignoredEvents = 0;
   let persistedLaunches = 0;
+  let duplicateLaunches = 0;
 
   try {
     for await (const event of feed.stream(controller.signal)) {
       events += 1;
       if (!event.tokenLaunch) {
+        await recordStreamHealthEvent(options.store, options.health, event, false);
         ignoredEvents += 1;
         continue;
       }
 
+      const duplicate = await isDuplicateLaunch(options.store, seenLaunches, event.tokenLaunch);
+      if (duplicate) duplicateLaunches += 1;
+      await recordStreamHealthEvent(options.store, options.health, event, duplicate);
       launches += 1;
       printLaunchEvent(event.tokenLaunch);
       if (options.store) {
@@ -515,14 +661,15 @@ async function runLaunchStreamTest(
     clearTimeout(timeout);
   }
 
-  return { events, launches, ignoredEvents, persistedLaunches };
+  return { events, launches, ignoredEvents, persistedLaunches, duplicateLaunches };
 }
 
 async function runMatchStream(
   feed: LaunchFeed,
   store: Store,
-  options: MatchStreamOptions
-): Promise<{ events: number; launches: number; matched: number; passed: number; rejected: number; persisted: number }> {
+  options: MatchStreamOptions,
+  health?: StreamHealthRun
+): Promise<{ events: number; launches: number; matched: number; passed: number; rejected: number; persisted: number; duplicateLaunches: number }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000);
   const observedAt = new Date();
@@ -536,18 +683,26 @@ async function runMatchStream(
   const matcher = createTokenMemeMatcher(parseNumberOption(options.minScore, "--min-score"), options.fixtureTopics);
   const metadataTimeoutMs = parsePositiveIntegerOption(options.metadataTimeoutMs, "--metadata-timeout-ms");
   const maxLaunches = parsePositiveIntegerOption(options.maxLaunches, "--max-launches");
+  const seenLaunches = new Set<string>();
   let events = 0;
   let launches = 0;
   let matched = 0;
   let passed = 0;
   let rejected = 0;
   let persisted = 0;
+  let duplicateLaunches = 0;
 
   try {
     for await (const event of feed.stream(controller.signal)) {
       events += 1;
-      if (!event.tokenLaunch) continue;
+      if (!event.tokenLaunch) {
+        await recordStreamHealthEvent(options.dryRun ? undefined : store, health, event, false);
+        continue;
+      }
 
+      const duplicate = await isDuplicateLaunch(options.dryRun ? undefined : store, seenLaunches, event.tokenLaunch);
+      if (duplicate) duplicateLaunches += 1;
+      await recordStreamHealthEvent(options.dryRun ? undefined : store, health, event, duplicate);
       launches += 1;
       if (!options.dryRun) {
         await store.upsertRawEvent(event);
@@ -582,12 +737,18 @@ async function runMatchStream(
   if (topics.length === 0) {
     console.log("No topics were available. Run trend-refresh first, use --refresh-trends, or use --fixture-topics for a deterministic check.");
   }
-  return { events, launches, matched, passed, rejected, persisted };
+  return { events, launches, matched, passed, rejected, persisted, duplicateLaunches };
 }
 
-function createLaunchFeed(source: string, fixturePath: string): LaunchFeed {
+function createLaunchFeed(source: string, fixturePath: string, options?: PumpApiFeedCliOptions): LaunchFeed {
   if (source === "fixture") return new JsonlLaunchFeed(fixturePath);
-  if (source === "pumpapi") return new PumpApiLaunchFeed();
+  if (source === "pumpapi") {
+    return new PumpApiLaunchFeed({
+      staleTimeoutMs: options?.staleTimeoutMs,
+      maxReconnects: options?.maxReconnects,
+      onStatus: options?.onStatus
+    });
+  }
   throw new Error(`Unsupported stream-test source "${source}". Use fixture or pumpapi.`);
 }
 

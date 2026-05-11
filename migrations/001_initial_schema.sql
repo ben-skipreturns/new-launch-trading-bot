@@ -181,6 +181,23 @@ create table if not exists trend_refresh_runs (
   raw jsonb not null default '{}'::jsonb
 );
 
+create table if not exists stream_health_runs (
+  id text primary key,
+  source text not null,
+  started_at timestamptz not null,
+  connected_at timestamptz,
+  disconnected_at timestamptz,
+  last_event_at timestamptz,
+  status text not null,
+  events_read integer not null default 0,
+  launches_read integer not null default 0,
+  duplicate_launches integer not null default 0,
+  reconnects integer not null default 0,
+  stale_warnings integer not null default 0,
+  error_text text,
+  raw jsonb not null default '{}'::jsonb
+);
+
 create table if not exists token_meme_matches (
   mint text not null references token_launches(mint) on delete cascade,
   observed_at timestamptz not null,
@@ -212,4 +229,5 @@ create index if not exists score_snapshots_mint_as_of_idx on score_snapshots(min
 create index if not exists trend_topics_last_seen_idx on trend_topics(last_seen desc);
 create index if not exists trend_refresh_runs_started_at_idx on trend_refresh_runs(started_at desc);
 create index if not exists trend_refresh_runs_window_idx on trend_refresh_runs(source, model, refresh_window_started_at);
+create index if not exists stream_health_runs_started_at_idx on stream_health_runs(started_at desc);
 create index if not exists token_meme_matches_mint_observed_at_idx on token_meme_matches(mint, observed_at desc);

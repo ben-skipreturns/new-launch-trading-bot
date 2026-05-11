@@ -243,6 +243,25 @@ export interface TrendRefreshRun {
   raw: JsonValue;
 }
 
+export type StreamHealthStatus = "running" | "completed" | "error" | "stale" | "aborted";
+
+export interface StreamHealthRun {
+  id: string;
+  source: string;
+  startedAt: Date;
+  connectedAt?: Date;
+  disconnectedAt?: Date;
+  lastEventAt?: Date;
+  status: StreamHealthStatus;
+  eventsRead: number;
+  launchesRead: number;
+  duplicateLaunches: number;
+  reconnects: number;
+  staleWarnings: number;
+  errorText?: string;
+  raw: JsonValue;
+}
+
 export interface TokenMemeMatch {
   mint: string;
   observedAt: Date;

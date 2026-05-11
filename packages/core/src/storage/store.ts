@@ -8,6 +8,7 @@ import type {
   RetentionPruneResult,
   RetentionRun,
   ScoreSnapshot,
+  StreamHealthRun,
   TokenEnrichment,
   TokenMemeMatch,
   TokenLaunch,
@@ -30,6 +31,7 @@ export interface Store {
   upsertTrendTopic(topic: TrendTopic): Promise<void>;
   insertTrendObservation(observation: TrendObservation, topicId?: string): Promise<void>;
   insertTrendRefreshRun(run: TrendRefreshRun): Promise<void>;
+  upsertStreamHealthRun(run: StreamHealthRun): Promise<void>;
   upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void>;
   insertRetentionRun(run: RetentionRun): Promise<void>;
 
@@ -46,6 +48,7 @@ export interface Store {
   listTrendTopics(activeSince?: Date, limit?: number): Promise<TrendTopic[]>;
   listTrendObservations(from?: Date, to?: Date): Promise<TrendObservation[]>;
   listTrendRefreshRuns(from?: Date, to?: Date): Promise<TrendRefreshRun[]>;
+  listStreamHealthRuns(limit?: number): Promise<StreamHealthRun[]>;
   getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined>;
   listTokenMemeMatches(from?: Date, to?: Date): Promise<TokenMemeMatch[]>;
   pruneRetention(options: RetentionPruneOptions): Promise<RetentionPruneResult>;

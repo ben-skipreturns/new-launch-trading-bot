@@ -8,6 +8,7 @@ import type {
   RetentionPruneResult,
   RetentionRun,
   ScoreSnapshot,
+  StreamHealthRun,
   TokenEnrichment,
   TokenMemeMatch,
   TokenLaunch,
@@ -31,6 +32,7 @@ export class MemoryStore implements Store {
   readonly trendTopics = new Map<string, TrendTopic>();
   readonly trendObservations: Array<TrendObservation & { topicId?: string }> = [];
   readonly trendRefreshRuns: TrendRefreshRun[] = [];
+  readonly streamHealthRuns: StreamHealthRun[] = [];
   readonly memeMatches: TokenMemeMatch[] = [];
   readonly retentionRuns: RetentionRun[] = [];
 
@@ -97,6 +99,15 @@ export class MemoryStore implements Store {
       return;
     }
     this.trendRefreshRuns.push(run);
+  }
+
+  async upsertStreamHealthRun(run: StreamHealthRun): Promise<void> {
+    const existingIndex = this.streamHealthRuns.findIndex((item) => item.id === run.id);
+    if (existingIndex >= 0) {
+      this.streamHealthRuns[existingIndex] = run;
+      return;
+    }
+    this.streamHealthRuns.push(run);
   }
 
   async upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void> {
@@ -170,6 +181,10 @@ export class MemoryStore implements Store {
 
   async listTrendRefreshRuns(from?: Date, to?: Date): Promise<TrendRefreshRun[]> {
     return between(this.trendRefreshRuns, (run) => run.startedAt, from, to);
+  }
+
+  async listStreamHealthRuns(limit = 20): Promise<StreamHealthRun[]> {
+    return [...this.streamHealthRuns].sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime()).slice(0, limit);
   }
 
   async getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined> {

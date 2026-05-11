@@ -11,6 +11,7 @@ import type {
   RetentionPruneResult,
   RetentionRun,
   ScoreSnapshot,
+  StreamHealthRun,
   TokenEnrichment,
   TokenMemeMatch,
   TokenLaunch,
@@ -202,6 +203,23 @@ interface TrendRefreshRunsTable {
   raw: JsonValue;
 }
 
+interface StreamHealthRunsTable {
+  id: string;
+  source: string;
+  started_at: Date;
+  connected_at: Date | null;
+  disconnected_at: Date | null;
+  last_event_at: Date | null;
+  status: string;
+  events_read: number;
+  launches_read: number;
+  duplicate_launches: number;
+  reconnects: number;
+  stale_warnings: number;
+  error_text: string | null;
+  raw: JsonValue;
+}
+
 interface TokenMemeMatchesTable {
   mint: string;
   observed_at: Date;
@@ -239,6 +257,7 @@ interface Database {
   trend_topics: TrendTopicsTable;
   trend_observations: TrendObservationsTable;
   trend_refresh_runs: TrendRefreshRunsTable;
+  stream_health_runs: StreamHealthRunsTable;
   token_meme_matches: TokenMemeMatchesTable;
   retention_runs: RetentionRunsTable;
 }
@@ -553,6 +572,43 @@ export class PostgresStore implements Store {
       .execute();
   }
 
+  async upsertStreamHealthRun(run: StreamHealthRun): Promise<void> {
+    await this.db
+      .insertInto("stream_health_runs")
+      .values({
+        id: run.id,
+        source: run.source,
+        started_at: run.startedAt,
+        connected_at: run.connectedAt ?? null,
+        disconnected_at: run.disconnectedAt ?? null,
+        last_event_at: run.lastEventAt ?? null,
+        status: run.status,
+        events_read: run.eventsRead,
+        launches_read: run.launchesRead,
+        duplicate_launches: run.duplicateLaunches,
+        reconnects: run.reconnects,
+        stale_warnings: run.staleWarnings,
+        error_text: run.errorText ?? null,
+        raw: run.raw
+      })
+      .onConflict((oc) =>
+        oc.column("id").doUpdateSet({
+          connected_at: run.connectedAt ?? null,
+          disconnected_at: run.disconnectedAt ?? null,
+          last_event_at: run.lastEventAt ?? null,
+          status: run.status,
+          events_read: run.eventsRead,
+          launches_read: run.launchesRead,
+          duplicate_launches: run.duplicateLaunches,
+          reconnects: run.reconnects,
+          stale_warnings: run.staleWarnings,
+          error_text: run.errorText ?? null,
+          raw: run.raw
+        })
+      )
+      .execute();
+  }
+
   async upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void> {
     await this.db
       .insertInto("token_meme_matches")
@@ -681,6 +737,10 @@ export class PostgresStore implements Store {
     if (from) query = query.where("started_at", ">=", from);
     if (to) query = query.where("started_at", "<=", to);
     return (await query.orderBy("started_at", "desc").execute()).map(trendRefreshRunFromRow);
+  }
+
+  async listStreamHealthRuns(limit = 20): Promise<StreamHealthRun[]> {
+    return (await this.db.selectFrom("stream_health_runs").selectAll().orderBy("started_at", "desc").limit(limit).execute()).map(streamHealthRunFromRow);
   }
 
   async getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined> {
@@ -912,6 +972,25 @@ function trendRefreshRunFromRow(row: Selectable<TrendRefreshRunsTable>): TrendRe
     webSearchCalls: row.web_search_calls,
     estimatedCostUsd: Number(row.estimated_cost_usd),
     responseId: row.response_id ?? undefined,
+    errorText: row.error_text ?? undefined,
+    raw: row.raw
+  };
+}
+
+function streamHealthRunFromRow(row: Selectable<StreamHealthRunsTable>): StreamHealthRun {
+  return {
+    id: row.id,
+    source: row.source,
+    startedAt: new Date(row.started_at),
+    connectedAt: row.connected_at ? new Date(row.connected_at) : undefined,
+    disconnectedAt: row.disconnected_at ? new Date(row.disconnected_at) : undefined,
+    lastEventAt: row.last_event_at ? new Date(row.last_event_at) : undefined,
+    status: row.status as StreamHealthRun["status"],
+    eventsRead: row.events_read,
+    launchesRead: row.launches_read,
+    duplicateLaunches: row.duplicate_launches,
+    reconnects: row.reconnects,
+    staleWarnings: row.stale_warnings,
     errorText: row.error_text ?? undefined,
     raw: row.raw
   };
