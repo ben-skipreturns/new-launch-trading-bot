@@ -30,6 +30,25 @@ describe("HeuristicScorer", () => {
     expect(score.decision).not.toBe("paper_buy");
     expect(score.reasons).toContain("MEME_RELEVANCE_TOO_LOW");
   });
+
+  it("blocks paper buys when the meme matcher produced reject flags", () => {
+    const score = new HeuristicScorer().score(feature({ memeRejectFlags: ["GENERIC_COPYCAT_PENALTY"] }));
+    expect(score.decision).toBe("reject");
+    expect(score.reasons).toContain("MEME_MATCH_REJECT_FLAGS");
+  });
+
+  it("keeps otherwise promising launches on watch until trade confidence is ready", () => {
+    const score = new HeuristicScorer().score(feature({ buyCount: 1, uniqueTraders: 1, tradeCount: 1 }));
+    expect(score.decision).toBe("watch");
+    expect(score.reasons).toContain("INSUFFICIENT_BUY_COUNT");
+    expect(score.reasons).toContain("INSUFFICIENT_TRADER_DIVERSITY");
+  });
+
+  it("rejects launches with heavy early sell pressure", () => {
+    const score = new HeuristicScorer().score(feature({ tradeCount: 6, buyCount: 3, sellCount: 3 }));
+    expect(score.decision).toBe("reject");
+    expect(score.reasons).toContain("HIGH_SELL_PRESSURE");
+  });
 });
 
 function feature(overrides: Partial<FeatureSnapshot>): FeatureSnapshot {

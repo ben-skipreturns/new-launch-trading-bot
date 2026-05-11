@@ -1,5 +1,5 @@
 import type { PaperBroker } from "./interfaces.js";
-import type { ExitEvent, PaperOrder, PaperPosition, ScoreSnapshot } from "./types.js";
+import type { ExitEvent, PaperOrder, PaperPosition, ScoreSnapshot, TokenLaunch } from "./types.js";
 import type { Store } from "../storage/store.js";
 import { round } from "../utils/math.js";
 import { isoDate } from "../utils/time.js";
@@ -20,6 +20,9 @@ export interface PaperBrokerConfig {
   trailingStopActivationMultiple: number;
   trailingStopDrawdownPct: number;
   timeoutTrendScoreThreshold: number;
+  maxOpenPositionsPerMemeTopic: number;
+  maxOpenPositionsPerCreator: number;
+  maxDailyBuysPerSymbolFamily: number;
 }
 
 export const defaultPaperBrokerConfig: PaperBrokerConfig = {
@@ -37,7 +40,10 @@ export const defaultPaperBrokerConfig: PaperBrokerConfig = {
   ],
   trailingStopActivationMultiple: 15,
   trailingStopDrawdownPct: 0.7,
-  timeoutTrendScoreThreshold: 0.45
+  timeoutTrendScoreThreshold: 0.45,
+  maxOpenPositionsPerMemeTopic: 2,
+  maxOpenPositionsPerCreator: 1,
+  maxDailyBuysPerSymbolFamily: 1
 };
 
 export class DefaultPaperBroker implements PaperBroker {
@@ -55,6 +61,10 @@ export class DefaultPaperBroker implements PaperBroker {
     if (openPositions.length >= this.config.maxConcurrentPositions) {
       return this.reject(score, "MAX_CONCURRENT_POSITIONS");
     }
+
+    const launch = await this.store.getTokenLaunch(score.mint);
+    const exposureRejectReason = await this.exposureRejectReason(score, launch, openPositions);
+    if (exposureRejectReason) return this.reject(score, exposureRejectReason);
 
     const spentToday = await this.spentOnDay(score.asOf);
     if (spentToday + this.config.buySizeSol > this.config.dailySpendCapSol) {
@@ -92,7 +102,7 @@ export class DefaultPaperBroker implements PaperBroker {
 
   async onPrice(score: ScoreSnapshot): Promise<PaperOrder[]> {
     const priceSol = score.features.priceSol;
-    if (!priceSol) return [];
+    if (!priceSol || !score.features.enrichmentFresh) return [];
     const position = await this.store.getOpenPosition(score.mint);
     if (!position) return [];
 
@@ -198,6 +208,42 @@ export class DefaultPaperBroker implements PaperBroker {
     return amount * (bps / 10_000);
   }
 
+  private async exposureRejectReason(score: ScoreSnapshot, launch: TokenLaunch | undefined, openPositions: PaperPosition[]): Promise<string | null> {
+    const openMints = new Set(openPositions.map((position) => position.mint));
+    const filledBuyOrders = (await this.store.listPaperOrders(undefined, score.asOf)).filter(
+      (order) => order.side === "buy" && order.status === "filled"
+    );
+
+    const topicKey = topicExposureKey(score);
+    if (topicKey) {
+      const openTopicCount = filledBuyOrders.filter((order) => openMints.has(order.mint) && topicExposureKey(order.scoreSnapshot) === topicKey).length;
+      if (openTopicCount >= this.config.maxOpenPositionsPerMemeTopic) return "MAX_TOPIC_EXPOSURE";
+    }
+
+    if (launch?.creator) {
+      let openCreatorCount = 0;
+      for (const position of openPositions) {
+        const existingLaunch = await this.store.getTokenLaunch(position.mint);
+        if (existingLaunch?.creator && existingLaunch.creator === launch.creator) openCreatorCount += 1;
+      }
+      if (openCreatorCount >= this.config.maxOpenPositionsPerCreator) return "MAX_CREATOR_EXPOSURE";
+    }
+
+    const symbolFamily = symbolFamilyKey(launch);
+    if (symbolFamily) {
+      const day = isoDate(score.asOf);
+      let dailyFamilyBuys = 0;
+      for (const order of filledBuyOrders) {
+        if (isoDate(order.createdAt) !== day) continue;
+        const boughtLaunch = await this.store.getTokenLaunch(order.mint);
+        if (symbolFamilyKey(boughtLaunch) === symbolFamily) dailyFamilyBuys += 1;
+      }
+      if (dailyFamilyBuys >= this.config.maxDailyBuysPerSymbolFamily) return "MAX_SYMBOL_FAMILY_EXPOSURE";
+    }
+
+    return null;
+  }
+
   private async spentOnDay(date: Date): Promise<number> {
     const day = isoDate(date);
     const orders = await this.store.listPaperOrders();
@@ -205,4 +251,15 @@ export class DefaultPaperBroker implements PaperBroker {
       .filter((order) => order.side === "buy" && order.status === "filled" && isoDate(order.createdAt) === day)
       .reduce((total, order) => total + order.solAmount, 0);
   }
+}
+
+function topicExposureKey(score: ScoreSnapshot): string | undefined {
+  return score.features.memeMatchedTopicId ?? score.features.memeMatchedTopic?.toLowerCase();
+}
+
+function symbolFamilyKey(launch: TokenLaunch | undefined): string | undefined {
+  const value = launch?.symbol ?? launch?.name;
+  if (!value) return undefined;
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return normalized || undefined;
 }
