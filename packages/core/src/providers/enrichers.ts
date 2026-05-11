@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import type { Enricher } from "../domain/interfaces.js";
 import type { JsonValue, TokenEnrichment, TokenLaunch } from "../domain/types.js";
 import { clamp } from "../utils/math.js";
@@ -39,6 +41,8 @@ export interface TokenMetadataEnricherOptions {
   maxBytes?: number;
   ipfsGateway?: string;
   arweaveGateway?: string;
+  maxRedirects?: number;
+  resolveHostname?: (hostname: string) => Promise<string[]>;
 }
 
 export class TokenMetadataEnricher implements Enricher {
@@ -47,17 +51,22 @@ export class TokenMetadataEnricher implements Enricher {
   private readonly maxBytes: number;
   private readonly ipfsGateway: string;
   private readonly arweaveGateway: string;
+  private readonly maxRedirects: number;
+  private readonly resolveHostname: (hostname: string) => Promise<string[]>;
 
   constructor(options: TokenMetadataEnricherOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 2500;
     this.maxBytes = options.maxBytes ?? 128_000;
     this.ipfsGateway = options.ipfsGateway ?? "https://ipfs.io/ipfs/";
     this.arweaveGateway = options.arweaveGateway ?? "https://arweave.net/";
+    this.maxRedirects = options.maxRedirects ?? 3;
+    this.resolveHostname = options.resolveHostname ?? defaultResolveHostname;
   }
 
   async enrich(launch: TokenLaunch, signal?: AbortSignal): Promise<TokenEnrichment | null> {
     const resolvedUrl = this.resolveUri(launch.uri);
-    if (!resolvedUrl) return null;
+    if (!launch.uri) return null;
+    if (!resolvedUrl) return metadataFetchFailure(launch, { reason: "unsupported_uri_scheme" });
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -65,19 +74,53 @@ export class TokenMetadataEnricher implements Enricher {
     signal?.addEventListener("abort", abortFromParent, { once: true });
 
     try {
-      const response = await fetch(resolvedUrl, {
-        signal: controller.signal,
-        headers: { accept: "application/json,text/plain;q=0.8,*/*;q=0.1" }
-      });
-      if (!response.ok) return null;
-      const contentLength = Number(response.headers.get("content-length") ?? 0);
-      if (contentLength > this.maxBytes) return null;
+      const response = await this.fetchWithSafeRedirects(resolvedUrl, controller.signal);
+      if (response instanceof MetadataFetchBlocked) {
+        return metadataFetchFailure(launch, {
+          reason: response.reason,
+          resolvedUrl,
+          blockedUrl: response.blockedUrl,
+          redirects: response.redirects
+        });
+      }
+      if (!response.response.ok) {
+        return metadataFetchFailure(launch, {
+          reason: "http_error",
+          resolvedUrl,
+          finalUrl: response.finalUrl,
+          httpStatus: response.response.status,
+          redirects: response.redirects
+        });
+      }
+      const contentLength = Number(response.response.headers.get("content-length") ?? 0);
+      if (contentLength > this.maxBytes) {
+        return metadataFetchFailure(launch, {
+          reason: "metadata_too_large",
+          resolvedUrl,
+          finalUrl: response.finalUrl,
+          redirects: response.redirects
+        });
+      }
 
-      const body = await response.text();
-      if (body.length > this.maxBytes) return null;
+      const body = await response.response.text();
+      if (body.length > this.maxBytes) {
+        return metadataFetchFailure(launch, {
+          reason: "metadata_too_large",
+          resolvedUrl,
+          finalUrl: response.finalUrl,
+          redirects: response.redirects
+        });
+      }
 
       const metadata = parseMetadataJson(body);
-      if (!metadata) return null;
+      if (!metadata) {
+        return metadataFetchFailure(launch, {
+          reason: "invalid_metadata_json",
+          resolvedUrl,
+          finalUrl: response.finalUrl,
+          redirects: response.redirects
+        });
+      }
 
       const metadataText = metadataTextForMatching(metadata);
       return {
@@ -89,14 +132,51 @@ export class TokenMetadataEnricher implements Enricher {
         raw: {
           metadataUri: launch.uri,
           resolvedUrl,
+          finalUrl: response.finalUrl,
+          redirects: response.redirects,
           metadata,
           metadataText
         } as JsonValue
       };
+    } catch (error) {
+      return metadataFetchFailure(launch, {
+        reason: error instanceof Error && error.name === "AbortError" ? "metadata_fetch_timeout" : "metadata_fetch_error",
+        resolvedUrl,
+        errorText: error instanceof Error ? error.message : String(error)
+      });
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abortFromParent);
     }
+  }
+
+  private async fetchWithSafeRedirects(
+    initialUrl: string,
+    signal: AbortSignal
+  ): Promise<{ response: Response; finalUrl: string; redirects: string[] } | MetadataFetchBlocked> {
+    let currentUrl = initialUrl;
+    const redirects: string[] = [];
+
+    for (let redirectCount = 0; redirectCount <= this.maxRedirects; redirectCount += 1) {
+      const safety = await validatePublicHttpUrl(currentUrl, this.resolveHostname);
+      if (!safety.safe) return new MetadataFetchBlocked(safety.reason, currentUrl, redirects);
+
+      const response = await fetch(currentUrl, {
+        signal,
+        redirect: "manual",
+        headers: { accept: "application/json,text/plain;q=0.8,*/*;q=0.1" }
+      });
+
+      if (!isRedirectStatus(response.status)) return { response, finalUrl: currentUrl, redirects };
+
+      const location = response.headers.get("location");
+      if (!location) return new MetadataFetchBlocked("redirect_missing_location", currentUrl, redirects);
+      if (redirectCount >= this.maxRedirects) return new MetadataFetchBlocked("too_many_redirects", currentUrl, redirects);
+      currentUrl = new URL(location, currentUrl).toString();
+      redirects.push(currentUrl);
+    }
+
+    return new MetadataFetchBlocked("too_many_redirects", currentUrl, redirects);
   }
 
   private resolveUri(uri?: string): string | null {
@@ -107,6 +187,123 @@ export class TokenMetadataEnricher implements Enricher {
     if (/^ar:\/\//i.test(trimmed)) return `${this.arweaveGateway}${trimmed.replace(/^ar:\/\//i, "")}`;
     return null;
   }
+}
+
+class MetadataFetchBlocked {
+  constructor(
+    readonly reason: string,
+    readonly blockedUrl: string,
+    readonly redirects: string[]
+  ) {}
+}
+
+function metadataFetchFailure(
+  launch: TokenLaunch,
+  details: {
+    reason: string;
+    resolvedUrl?: string;
+    finalUrl?: string;
+    blockedUrl?: string;
+    httpStatus?: number;
+    redirects?: string[];
+    errorText?: string;
+  }
+): TokenEnrichment {
+  return {
+    mint: launch.mint,
+    observedAt: new Date(),
+    provider: "token-metadata-uri-failed",
+    sentimentKeywords: [],
+    socialLinks: {},
+    raw: {
+      metadataUri: launch.uri,
+      status: "failed",
+      ...details
+    } as JsonValue
+  };
+}
+
+async function validatePublicHttpUrl(
+  value: string,
+  resolveHostname: (hostname: string) => Promise<string[]>
+): Promise<{ safe: true } | { safe: false; reason: string }> {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return { safe: false, reason: "invalid_url" };
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { safe: false, reason: "unsupported_url_protocol" };
+  if (url.username || url.password) return { safe: false, reason: "url_credentials_not_allowed" };
+
+  const hostname = normalizeHostname(url.hostname);
+  if (!hostname) return { safe: false, reason: "missing_hostname" };
+  if (isBlockedHostname(hostname)) return { safe: false, reason: "blocked_hostname" };
+
+  if (isIP(hostname)) {
+    return isPublicIp(hostname) ? { safe: true } : { safe: false, reason: "blocked_private_ip" };
+  }
+
+  const addresses = await resolveHostname(hostname);
+  if (addresses.length === 0) return { safe: false, reason: "hostname_resolution_failed" };
+  if (addresses.some((address) => !isPublicIp(address))) return { safe: false, reason: "blocked_private_ip" };
+  return { safe: true };
+}
+
+async function defaultResolveHostname(hostname: string): Promise<string[]> {
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  return addresses.map((item) => item.address);
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "").replace(/\.$/, "");
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") ||
+    hostname === "metadata" ||
+    hostname === "metadata.google.internal"
+  );
+}
+
+function isPublicIp(value: string): boolean {
+  const normalized = normalizeHostname(value).split("%")[0];
+  if (isIP(normalized) === 4) return isPublicIpv4(normalized);
+  if (isIP(normalized) === 6) return isPublicIpv6(normalized);
+  return false;
+}
+
+function isPublicIpv4(value: string): boolean {
+  const parts = value.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && (b === 0 || b === 168)) return false;
+  if (a === 198 && (b === 18 || b === 19 || b === 51)) return false;
+  if (a === 203 && b === 0) return false;
+  if (a >= 224) return false;
+  return true;
+}
+
+function isPublicIpv6(value: string): boolean {
+  const normalized = value.toLowerCase();
+  if (normalized === "::" || normalized === "::1") return false;
+  if (normalized.startsWith("::ffff:")) return isPublicIpv4(normalized.slice("::ffff:".length));
+  if (/^f[cd]/.test(normalized)) return false;
+  if (/^fe[89ab]/.test(normalized)) return false;
+  if (normalized.startsWith("2001:db8:")) return false;
+  return true;
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status >= 300 && status < 400;
 }
 
 export class DexScreenerEnricher implements Enricher {
