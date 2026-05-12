@@ -5,7 +5,7 @@ import { MetricCard } from "../../../components/metric-card";
 import { DecisionBadge, RiskBadge, StatusBadge } from "../../../components/status-badge";
 import { getLaunchDetail } from "../../../lib/data";
 import { formatAge, formatDate, formatPct, formatScore, formatSol, shortMint } from "../../../lib/format";
-import type { MatcherDiagnostics } from "../../../lib/types";
+import type { LaunchBrokerAudit, LaunchGateAudit, LaunchGateAuditGate, LaunchGateAuditStatus, MatcherDiagnostics } from "../../../lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -56,6 +56,8 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
         <MetricCard title="Risk" value={formatScore(launch.riskScore)} detail="On-chain risk gate" tone={launch.riskScore <= 0.35 ? "good" : "bad"} />
         <MetricCard title="Latest price" value={formatSol(launch.latestPriceSol, 8)} detail={`Scored ${formatAge(launch.latestScoreAt)}`} tone="watch" />
       </section>
+
+      <LaunchGateAuditPanel audit={data.gateAudit} />
 
       <section className="grid grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)] gap-4 max-[1120px]:grid-cols-1">
         <div className="panel rounded-md p-4">
@@ -230,6 +232,87 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ m
   );
 }
 
+function LaunchGateAuditPanel({ audit }: { audit: LaunchGateAudit }) {
+  return (
+    <section className="panel rounded-md p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-muted">Gate audit</h2>
+          <p className="mt-1 text-sm leading-5 text-muted">
+            Token-level pass/fail review for each scoring gate, with actual values compared to thresholds.
+          </p>
+        </div>
+        <BrokerStatus broker={audit.broker} />
+      </div>
+
+      <div className="mt-4 grid gap-3 min-[960px]:grid-cols-2">
+        {audit.gates.map((gate) => (
+          <LaunchGateCard gate={gate} key={gate.key} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LaunchGateCard({ gate }: { gate: LaunchGateAuditGate }) {
+  return (
+    <article className="field-tile rounded-md p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-ink">{gate.label}</div>
+          <div className="mt-1 text-sm leading-5 text-muted">{gate.summary}</div>
+        </div>
+        <StatusBadge label={gateStatusLabel(gate.status)} tone={gateStatusTone(gate.status)} />
+      </div>
+
+      {gate.reasons.length ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {gate.reasons.map((reason) => (
+            <StatusBadge label={reasonLabel(reason)} key={reason} tone="reject" />
+          ))}
+        </div>
+      ) : null}
+
+      <div className="mt-3 space-y-2">
+        <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)_minmax(0,0.85fr)_auto] gap-2 px-2 text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted max-[720px]:hidden">
+          <div>Check</div>
+          <div>Actual</div>
+          <div>Threshold</div>
+          <div>Result</div>
+        </div>
+        {gate.checks.map((check) => (
+          <div
+            className="grid items-center gap-2 rounded-md border border-line bg-panel/45 px-2 py-2 text-sm max-[720px]:grid-cols-2 min-[721px]:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)_minmax(0,0.85fr)_auto]"
+            key={`${gate.key}:${check.label}`}
+          >
+            <div className="min-w-0 font-medium text-ink">{check.label}</div>
+            <div className="min-w-0 text-muted max-[720px]:text-right">{check.actual}</div>
+            <div className="min-w-0 text-muted max-[720px]:col-start-1">{check.threshold}</div>
+            <div className="justify-self-end">
+              <StatusBadge label={check.passed ? "pass" : "fail"} tone={check.passed ? "buy" : "reject"} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function BrokerStatus({ broker }: { broker: LaunchBrokerAudit }) {
+  const tone = broker.brokerStatus === "filled" ? "buy" : broker.brokerStatus === "rejected" ? "reject" : "neutral";
+  return (
+    <div className="field-tile min-w-[250px] rounded-md px-3 py-2 text-sm">
+      <div className="text-[0.68rem] font-semibold uppercase tracking-[0.08em] text-muted">Scorer vs broker</div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <DecisionBadge decision={broker.scorerDecision} />
+        <StatusBadge label={broker.brokerStatus.replaceAll("_", " ")} tone={tone} />
+      </div>
+      {broker.brokerReason ? <div className="mt-2 text-xs text-muted">{reasonLabel(broker.brokerReason)}</div> : null}
+      {broker.orderAt ? <div className="mt-1 text-xs text-muted">order {formatAge(broker.orderAt)}</div> : null}
+    </div>
+  );
+}
+
 function MatcherDiagnosticsPanel({ diagnostics }: { diagnostics?: MatcherDiagnostics }) {
   if (!diagnostics) {
     return (
@@ -322,6 +405,22 @@ function Field({ label, value }: { label: string; value: string }) {
       <div className="mt-1 truncate font-semibold">{value}</div>
     </div>
   );
+}
+
+function gateStatusLabel(status: LaunchGateAuditStatus): string {
+  if (status === "not_applicable") return "not applicable";
+  return status;
+}
+
+function gateStatusTone(status: LaunchGateAuditStatus): "buy" | "reject" | "neutral" {
+  if (status === "pass") return "buy";
+  if (status === "fail") return "reject";
+  return "neutral";
+}
+
+function reasonLabel(reason: string): string {
+  if (reason.startsWith("MEME_TOPIC:")) return `topic: ${reason.slice("MEME_TOPIC:".length)}`;
+  return reason.toLowerCase().replaceAll("_", " ");
 }
 
 function ReasonList({ title, items }: { title: string; items: string[] }) {

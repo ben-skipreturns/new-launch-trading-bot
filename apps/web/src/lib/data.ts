@@ -3,7 +3,7 @@ import "server-only";
 import { Pool } from "pg";
 import type { ExitEvent, PaperOrder, ScoreSnapshot } from "@moonshot/core";
 import { calculateDashboardMetrics, calculatePositionDerivedValues } from "./aggregate";
-import { buildDecisionReview, emptyDecisionReview, type DecisionBuyOrderInput, type DecisionRawCounts } from "./decision-review";
+import { buildDecisionReview, buildLaunchGateAudit, emptyDecisionReview, type DecisionBuyOrderInput, type DecisionRawCounts } from "./decision-review";
 import { loadWorkspaceEnv } from "./env";
 import type {
   DashboardSummary,
@@ -148,6 +148,7 @@ export async function getLaunchDetail(mint: string): Promise<DataState<LaunchDet
       scoreHistory,
       orders,
       exits,
+      gateAudit: buildLaunchGateAudit(launch, scoreHistory[0]?.features, orders),
       memeEvidenceUrls: latestMatch?.evidence_urls ?? [],
       memeReasons: latestMatch?.reasons ?? [],
       memeRejectFlags: latestMatch?.reject_flags ?? [],

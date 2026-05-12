@@ -5,11 +5,16 @@ import type {
   DecisionReasonCount,
   DecisionReview,
   GateBlockedLaunch,
+  LaunchBrokerAudit,
+  LaunchGateAudit,
+  LaunchGateAuditCheck,
+  LaunchGateAuditGate,
   LaunchListItem,
   PaperStrategySummary,
   PositionLifecycleItem,
   PositionListItem
 } from "./types";
+import type { PaperOrder, ScoreSnapshot } from "@moonshot/core";
 
 export interface DecisionRawCounts {
   totalLaunches: number;
@@ -185,6 +190,135 @@ export function buildDecisionReview({ launches, rawCounts, buyOrders, positions 
     almostBuys: buildAlmostBuys(launches),
     strategy: strategySummary,
     positionLifecycle: buildPositionLifecycle(positions, buyOrders)
+  };
+}
+
+export function buildLaunchGateAudit(launch: LaunchListItem, features: ScoreSnapshot["features"] | undefined, orders: PaperOrder[]): LaunchGateAudit {
+  const buyOrders = orders.filter((order) => order.side === "buy").sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  const latestBuyOrder = buyOrders[0];
+  const broker = brokerAudit(launch, latestBuyOrder);
+  return {
+    gates: [
+      launchGate("meme", "Meme gate", memeGateChecks(launch), "Meme relevance clears the required threshold and has no matcher reject flags."),
+      launchGate("risk", "Risk gate", riskGateChecks(launch, features), "Aggregate and component risk stay below the configured limits."),
+      launchGate("confidence", "Trade confidence gate", confidenceGateChecks(launch, features), "Early flow has enough breadth, net buying, and curve progress."),
+      launchGate("price", "Price freshness gate", priceGateChecks(launch, features), "A fresh price snapshot is available for paper execution."),
+      launchGate("ev", "EV threshold", evGateChecks(launch), "Expected-value score clears the paper-buy threshold."),
+      exposureLaunchGate(launch, broker)
+    ],
+    broker
+  };
+}
+
+function memeGateChecks(launch: LaunchListItem): LaunchGateAuditCheck[] {
+  return [
+    check("Meme relevance score", fixed(launch.memeRelevanceScore), `>= ${fixed(scorerDefaults.memeThreshold)}`, launch.memeRelevanceScore >= scorerDefaults.memeThreshold, "MEME_RELEVANCE_TOO_LOW"),
+    check("Matcher reject flags", launch.reasons.includes("MEME_MATCH_REJECT_FLAGS") ? "present" : "none", "none", !launch.reasons.includes("MEME_MATCH_REJECT_FLAGS"), "MEME_MATCH_REJECT_FLAGS")
+  ];
+}
+
+function riskGateChecks(launch: LaunchListItem, features: ScoreSnapshot["features"] | undefined): LaunchGateAuditCheck[] {
+  return [
+    check("Risk score", fixed(launch.riskScore), `<= ${fixed(scorerDefaults.riskThreshold)}`, launch.riskScore <= scorerDefaults.riskThreshold, "RISK_TOO_HIGH"),
+    check("Bot-like share", pct(features?.botLikeShare), "< 35%", valueBelow(features?.botLikeShare, 0.35, !launch.reasons.includes("HIGH_BOT_SHARE")), "HIGH_BOT_SHARE"),
+    check("Wash-trade share", pct(features?.washTradeShare), "< 20%", valueBelow(features?.washTradeShare, 0.2, !launch.reasons.includes("HIGH_WASH_ACTIVITY")), "HIGH_WASH_ACTIVITY"),
+    check("Top-holder share", pct(features?.topHolderShare), "< 25%", valueBelow(features?.topHolderShare, 0.25, !launch.reasons.includes("CONCENTRATED_SUPPLY")), "CONCENTRATED_SUPPLY"),
+    check("Dev supply share", pct(features?.devSupplyShare), "< 12%", valueBelow(features?.devSupplyShare, 0.12, !launch.reasons.includes("CONCENTRATED_SUPPLY")), "CONCENTRATED_SUPPLY"),
+    check("Insider share", pct(features?.insiderShare), "< 15%", valueBelow(features?.insiderShare, 0.15, !launch.reasons.includes("INSIDER_HEAVY_SUPPLY")), "INSIDER_HEAVY_SUPPLY")
+  ];
+}
+
+function confidenceGateChecks(launch: LaunchListItem, features: ScoreSnapshot["features"] | undefined): LaunchGateAuditCheck[] {
+  const sellPressure = features && features.tradeCount > 0 ? features.sellCount / features.tradeCount : undefined;
+  return [
+    check("Buy count", integer(features?.buyCount), `>= ${scorerDefaults.minBuyCount}`, valueAtLeast(features?.buyCount, scorerDefaults.minBuyCount, !launch.reasons.includes("INSUFFICIENT_BUY_COUNT")), "INSUFFICIENT_BUY_COUNT"),
+    check("Unique traders", integer(features?.uniqueTraders), `>= ${scorerDefaults.minUniqueTraders}`, valueAtLeast(features?.uniqueTraders, scorerDefaults.minUniqueTraders, !launch.reasons.includes("INSUFFICIENT_TRADER_DIVERSITY")), "INSUFFICIENT_TRADER_DIVERSITY"),
+    check("Net SOL flow", sol(features?.netSolFlow), `>= ${sol(scorerDefaults.minNetSolFlow)}`, valueAtLeast(features?.netSolFlow, scorerDefaults.minNetSolFlow, !launch.reasons.includes("WEAK_NET_SOL_FLOW")), "WEAK_NET_SOL_FLOW"),
+    check("Sell pressure", pct(sellPressure), `<= ${pct(scorerDefaults.maxSellPressure)}`, valueAtMost(sellPressure, scorerDefaults.maxSellPressure, !launch.reasons.includes("HIGH_SELL_PRESSURE")), "HIGH_SELL_PRESSURE"),
+    check("Entry age", features?.ageSeconds === undefined ? "not captured" : `${features.ageSeconds}s`, `<= ${scorerDefaults.maxEntryAgeSeconds}s`, valueAtMost(features?.ageSeconds, scorerDefaults.maxEntryAgeSeconds, !launch.reasons.includes("ENTRY_WINDOW_EXPIRED")), "ENTRY_WINDOW_EXPIRED"),
+    check("Bonding curve progress", pct(features?.bondingCurveProgress), `>= ${pct(scorerDefaults.minBondingCurveProgress)}`, valueAtLeast(features?.bondingCurveProgress, scorerDefaults.minBondingCurveProgress, !launch.reasons.includes("BONDING_CURVE_TOO_EARLY")), "BONDING_CURVE_TOO_EARLY")
+  ];
+}
+
+function priceGateChecks(launch: LaunchListItem, features: ScoreSnapshot["features"] | undefined): LaunchGateAuditCheck[] {
+  const hasPrice = Boolean(features?.priceSol ?? launch.latestPriceSol);
+  const fresh = Boolean(features?.enrichmentFresh);
+  return [
+    check("Price snapshot", sol(features?.priceSol ?? launch.latestPriceSol, 8), "present", hasPrice, "STALE_OR_MISSING_PRICE"),
+    check("Enrichment freshness", fresh ? "fresh" : "stale or missing", "fresh", fresh, "STALE_OR_MISSING_PRICE")
+  ];
+}
+
+function evGateChecks(launch: LaunchListItem): LaunchGateAuditCheck[] {
+  return [
+    check("Expected-value score", fixed(launch.expectedValueScore), `>= ${fixed(scorerDefaults.expectedValueThreshold)}`, launch.expectedValueScore >= scorerDefaults.expectedValueThreshold, "SCORE_BELOW_THRESHOLD")
+  ];
+}
+
+function exposureLaunchGate(launch: LaunchListItem, broker: LaunchBrokerAudit): LaunchGateAuditGate {
+  if (launch.decision !== "paper_buy") {
+    return {
+      key: "exposure",
+      label: "Exposure cap gate",
+      status: "not_applicable",
+      summary: "Broker caps are only evaluated after the scorer emits paper_buy.",
+      reasons: [],
+      checks: [check("Scorer decision", launch.decision, "paper_buy", false)]
+    };
+  }
+
+  const passed = broker.brokerStatus === "filled";
+  const failed = broker.brokerStatus === "rejected";
+  return {
+    key: "exposure",
+    label: "Exposure cap gate",
+    status: passed ? "pass" : failed ? "fail" : "not_applicable",
+    summary: passed
+      ? "Paper broker accepted the entry."
+      : failed
+        ? `Paper broker rejected the entry: ${broker.brokerReason ?? "unknown reason"}.`
+        : "No broker order is stored for this paper_buy signal.",
+    reasons: broker.brokerReason ? [broker.brokerReason] : [],
+    checks: [
+      check("Scorer decision", launch.decision, "paper_buy", launch.decision === "paper_buy"),
+      check("Broker result", broker.brokerStatus.replaceAll("_", " "), "filled", passed, broker.brokerReason)
+    ]
+  };
+}
+
+function launchGate(key: string, label: string, checks: LaunchGateAuditCheck[], passSummary: string): LaunchGateAuditGate {
+  const failedChecks = checks.filter((item) => !item.passed);
+  return {
+    key,
+    label,
+    status: failedChecks.length ? "fail" : "pass",
+    summary: failedChecks.length ? `Blocked by ${failedChecks.map((item) => item.reason ?? item.label).join(", ")}.` : passSummary,
+    reasons: [...new Set(failedChecks.map((item) => item.reason).filter((item): item is string => Boolean(item)))],
+    checks
+  };
+}
+
+function brokerAudit(launch: LaunchListItem, latestBuyOrder: PaperOrder | undefined): LaunchBrokerAudit {
+  if (launch.decision !== "paper_buy") {
+    return {
+      scorerDecision: launch.decision,
+      brokerStatus: "not_triggered",
+      brokerReason: `scorer decision is ${launch.decision}`
+    };
+  }
+  if (!latestBuyOrder) {
+    return {
+      scorerDecision: launch.decision,
+      brokerStatus: "no_order",
+      brokerReason: "no buy order stored"
+    };
+  }
+  return {
+    scorerDecision: launch.decision,
+    brokerStatus: latestBuyOrder.status,
+    brokerReason: latestBuyOrder.reason,
+    orderId: latestBuyOrder.id,
+    orderAt: latestBuyOrder.createdAt
   };
 }
 
@@ -386,4 +520,36 @@ function blockedLaunch(launch: LaunchListItem, blockedBy?: string): GateBlockedL
 
 function hasAnyReason(launch: LaunchListItem, reasons: readonly string[]): boolean {
   return reasons.some((reason) => launch.reasons.includes(reason));
+}
+
+function check(label: string, actual: string, threshold: string, passed: boolean, reason?: string): LaunchGateAuditCheck {
+  return { label, actual, threshold, passed, reason };
+}
+
+function valueAtLeast(value: number | undefined, threshold: number, fallback: boolean): boolean {
+  return value === undefined ? fallback : value >= threshold;
+}
+
+function valueAtMost(value: number | undefined, threshold: number, fallback: boolean): boolean {
+  return value === undefined ? fallback : value <= threshold;
+}
+
+function valueBelow(value: number | undefined, threshold: number, fallback: boolean): boolean {
+  return value === undefined ? fallback : value < threshold;
+}
+
+function fixed(value: number | undefined): string {
+  return value === undefined || Number.isNaN(value) ? "not captured" : value.toFixed(3);
+}
+
+function integer(value: number | undefined): string {
+  return value === undefined || Number.isNaN(value) ? "not captured" : value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+function pct(value: number | undefined): string {
+  return value === undefined || Number.isNaN(value) ? "not captured" : `${(value * 100).toFixed(1)}%`;
+}
+
+function sol(value: number | undefined, digits = 4): string {
+  return value === undefined || Number.isNaN(value) ? "not captured" : `${value.toFixed(digits)} SOL`;
 }

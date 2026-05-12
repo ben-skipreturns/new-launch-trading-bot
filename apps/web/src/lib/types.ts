@@ -314,11 +314,44 @@ export interface DecisionReview {
   positionLifecycle: PositionLifecycleItem[];
 }
 
+export type LaunchGateAuditStatus = "pass" | "fail" | "not_applicable";
+
+export interface LaunchGateAuditCheck {
+  label: string;
+  actual: string;
+  threshold: string;
+  passed: boolean;
+  reason?: string;
+}
+
+export interface LaunchGateAuditGate {
+  key: string;
+  label: string;
+  status: LaunchGateAuditStatus;
+  summary: string;
+  reasons: string[];
+  checks: LaunchGateAuditCheck[];
+}
+
+export interface LaunchBrokerAudit {
+  scorerDecision: Decision | "none";
+  brokerStatus: "filled" | "rejected" | "not_triggered" | "no_order";
+  brokerReason?: string;
+  orderId?: string;
+  orderAt?: Date;
+}
+
+export interface LaunchGateAudit {
+  gates: LaunchGateAuditGate[];
+  broker: LaunchBrokerAudit;
+}
+
 export interface LaunchDetail {
   launch: LaunchListItem;
   scoreHistory: ScoreSnapshot[];
   orders: PaperOrder[];
   exits: ExitEvent[];
+  gateAudit: LaunchGateAudit;
   memeEvidenceUrls: string[];
   memeReasons: string[];
   memeRejectFlags: string[];
