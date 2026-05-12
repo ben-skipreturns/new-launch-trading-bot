@@ -195,6 +195,108 @@ describe("OpenAiMemeTrendSource", () => {
     expect(runs[0].estimatedCostUsd).toBeGreaterThan(0);
   });
 
+  it("preserves failed attempt cost when the same window is retried", async () => {
+    const store = new MemoryStore();
+    const failedSource = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => jsonResponse({ ...openAiPayload(), output_text: "{not-json" })
+    });
+    await expect(failedSource.fetchObservations()).rejects.toThrow();
+
+    const successfulSource = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => jsonResponse(openAiPayload())
+    });
+    await successfulSource.fetchObservations();
+
+    const runs = await store.listTrendRefreshRuns();
+    expect(runs.map((run) => run.status)).toEqual(["error", "success"]);
+    expect(runs.filter((run) => run.estimatedCostUsd > 0)).toHaveLength(2);
+  });
+
+  it("counts running refresh reservations before allowing another OpenAI call", async () => {
+    const store = new MemoryStore();
+    let firstFetchCalls = 0;
+    let secondFetchCalls = 0;
+    let releaseFetch!: () => void;
+    let enteredFetch!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      enteredFetch = resolve;
+    });
+    const fetchRelease = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const firstSource = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      model: "gpt-5.4-mini-a",
+      dailyBudgetUsd: 0.03,
+      estimatedRefreshCostUsd: 0.02,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => {
+        firstFetchCalls += 1;
+        enteredFetch();
+        await fetchRelease;
+        return jsonResponse(openAiPayload());
+      }
+    });
+    const secondSource = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      model: "gpt-5.4-mini-b",
+      dailyBudgetUsd: 0.03,
+      estimatedRefreshCostUsd: 0.02,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => {
+        secondFetchCalls += 1;
+        return jsonResponse(openAiPayload());
+      }
+    });
+
+    const firstRefresh = firstSource.fetchObservations();
+    await fetchStarted;
+    const secondObservations = await secondSource.fetchObservations();
+    releaseFetch();
+    await firstRefresh;
+
+    expect(firstFetchCalls).toBe(1);
+    expect(secondFetchCalls).toBe(0);
+    expect(secondObservations).toEqual([]);
+    expect((await store.listTrendRefreshRuns()).map((run) => run.status)).toEqual(["success", "skipped_budget"]);
+  });
+
+  it("abandons stale running refresh leases before retrying a window", async () => {
+    const store = new MemoryStore();
+    await store.insertTrendRefreshRun(
+      refreshRun({
+        id: "stale-running",
+        refreshWindowStartedAt: new Date("2026-05-09T12:00:00.000Z"),
+        refreshWindowEndedAt: new Date("2026-05-09T13:00:00.000Z"),
+        startedAt: new Date("2026-05-09T12:00:00.000Z"),
+        completedAt: undefined,
+        status: "running",
+        estimatedCostUsd: 0.02
+      })
+    );
+    const source = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      refreshMinutes: 60,
+      staleLeaseMinutes: 15,
+      now: () => new Date("2026-05-09T12:45:00.000Z"),
+      fetchFn: async () => jsonResponse(openAiPayload())
+    });
+
+    const observations = await source.fetchObservations();
+
+    expect(observations).toHaveLength(1);
+    expect((await store.listTrendRefreshRuns()).map((run) => run.status)).toEqual(["abandoned", "success"]);
+  });
+
   it("skips refreshes when estimated spend would exceed the configured cap", async () => {
     const store = new MemoryStore();
     await store.insertTrendRefreshRun(refreshRun({ estimatedCostUsd: 0.02, status: "error" }));
@@ -213,6 +315,24 @@ describe("OpenAiMemeTrendSource", () => {
 
     expect(observations).toEqual([]);
     expect((await store.listTrendRefreshRuns()).map((run) => run.status)).toContain("skipped_budget");
+  });
+
+  it("enforces the per-refresh budget cap without a store", async () => {
+    let fetchCalls = 0;
+    const source = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      dailyBudgetUsd: 0.01,
+      estimatedRefreshCostUsd: 0.02,
+      fetchFn: async () => {
+        fetchCalls += 1;
+        return jsonResponse(openAiPayload());
+      }
+    });
+
+    const observations = await source.fetchObservations();
+
+    expect(observations).toEqual([]);
+    expect(fetchCalls).toBe(0);
   });
 
   it("estimates model and web-search cost from usage", () => {

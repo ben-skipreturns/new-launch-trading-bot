@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { TrendSource } from "../domain/interfaces.js";
 import type { JsonObject, JsonValue, TrendObservation, TrendRefreshRun, TrendTopicType } from "../domain/types.js";
 import { buildCaseStudyPromptSummary } from "../meme/caseStudies.js";
 import { normalizePhrase, slugify } from "../meme/text.js";
-import type { Store } from "../storage/store.js";
+import type { Store, TrendRefreshClaimResult } from "../storage/store.js";
 import { clamp, round } from "../utils/math.js";
 
 export const OPENAI_MEME_RADAR_SOURCE = "openai-meme-radar";
@@ -16,6 +17,7 @@ export interface OpenAiMemeTrendSourceOptions {
   monthlyBudgetUsd?: number;
   dailyBudgetUsd?: number;
   estimatedRefreshCostUsd?: number;
+  staleLeaseMinutes?: number;
   maxTopics?: number;
   maxToolCalls?: number;
   maxOutputTokens?: number;
@@ -169,6 +171,7 @@ export class OpenAiMemeTrendSource implements TrendSource {
   private readonly monthlyBudgetUsd: number;
   private readonly dailyBudgetUsd: number;
   private readonly estimatedRefreshCostUsd: number;
+  private readonly staleLeaseMs: number;
   private readonly maxTopics: number;
   private readonly maxToolCalls: number;
   private readonly maxOutputTokens: number;
@@ -190,6 +193,7 @@ export class OpenAiMemeTrendSource implements TrendSource {
       process.env.OPENAI_TREND_ESTIMATED_REFRESH_COST_USD,
       0.1
     );
+    this.staleLeaseMs = numberOption(options.staleLeaseMinutes, process.env.OPENAI_TREND_STALE_LEASE_MINUTES, 30) * 60 * 1000;
     this.maxTopics = numberOption(options.maxTopics, process.env.OPENAI_TREND_MAX_TOPICS, 20);
     this.maxToolCalls = numberOption(options.maxToolCalls, process.env.OPENAI_TREND_MAX_TOOL_CALLS, 2);
     this.maxOutputTokens = numberOption(options.maxOutputTokens, process.env.OPENAI_TREND_MAX_OUTPUT_TOKENS, 12000);
@@ -201,11 +205,28 @@ export class OpenAiMemeTrendSource implements TrendSource {
   async fetchObservations(signal?: AbortSignal): Promise<TrendObservation[]> {
     const startedAt = this.now();
     const window = refreshWindow(startedAt, this.refreshMinutes);
-    const runId = `${this.name}:${this.model}:${window.startedAt.toISOString()}`;
-    const duplicate = await this.hasSuccessfulRunForWindow(window.startedAt, window.endedAt);
-    if (duplicate) {
+    const baseRunId = `${this.name}:${this.model}:${window.startedAt.toISOString()}`;
+    const claim = await this.claimRun({
+      id: trendRefreshAttemptId(baseRunId, startedAt),
+      source: this.name,
+      model: this.model,
+      promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
+      refreshWindowStartedAt: window.startedAt,
+      refreshWindowEndedAt: window.endedAt,
+      startedAt,
+      status: "running",
+      topicsFound: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      webSearchCalls: 0,
+      estimatedCostUsd: this.estimatedRefreshCostUsd,
+      raw: { baseRunId, reason: "refresh lease claimed before OpenAI request" }
+    });
+
+    if (claim.status === "duplicate_success" || claim.status === "already_running") {
       await this.recordRun({
-        id: `${runId}:duplicate:${startedAt.toISOString()}`,
+        id: `${baseRunId}:duplicate:${startedAt.toISOString()}:${randomUUID()}`,
         source: this.name,
         model: this.model,
         promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
@@ -220,18 +241,14 @@ export class OpenAiMemeTrendSource implements TrendSource {
         outputTokens: 0,
         webSearchCalls: 0,
         estimatedCostUsd: 0,
-        raw: { reason: "successful refresh already exists for this source/model/window" }
+        raw: { reason: claim.status === "duplicate_success" ? "successful refresh already exists for this source/model/window" : "refresh already running for this source/model/window" }
       });
       return [];
     }
 
-    const budget = await this.currentSpend(startedAt);
-    if (
-      budget.day + this.estimatedRefreshCostUsd > this.dailyBudgetUsd ||
-      budget.month + this.estimatedRefreshCostUsd > this.monthlyBudgetUsd
-    ) {
+    if (claim.status === "budget_exceeded") {
       await this.recordRun({
-        id: runId,
+        id: `${baseRunId}:skipped_budget:${startedAt.toISOString()}:${randomUUID()}`,
         source: this.name,
         model: this.model,
         promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
@@ -247,8 +264,8 @@ export class OpenAiMemeTrendSource implements TrendSource {
         webSearchCalls: 0,
         estimatedCostUsd: 0,
         raw: {
-          daySpendUsd: round(budget.day),
-          monthSpendUsd: round(budget.month),
+          daySpendUsd: round(claim.daySpendUsd),
+          monthSpendUsd: round(claim.monthSpendUsd),
           estimatedRefreshCostUsd: this.estimatedRefreshCostUsd,
           dailyBudgetUsd: this.dailyBudgetUsd,
           monthlyBudgetUsd: this.monthlyBudgetUsd
@@ -257,44 +274,7 @@ export class OpenAiMemeTrendSource implements TrendSource {
       return [];
     }
 
-    const claimed = await this.tryStartRun({
-      id: runId,
-      source: this.name,
-      model: this.model,
-      promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
-      refreshWindowStartedAt: window.startedAt,
-      refreshWindowEndedAt: window.endedAt,
-      startedAt,
-      status: "running",
-      topicsFound: 0,
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      outputTokens: 0,
-      webSearchCalls: 0,
-      estimatedCostUsd: 0,
-      raw: { reason: "refresh lease claimed before OpenAI request" }
-    });
-    if (!claimed) {
-      await this.recordRun({
-        id: `${runId}:duplicate:${startedAt.toISOString()}`,
-        source: this.name,
-        model: this.model,
-        promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
-        refreshWindowStartedAt: window.startedAt,
-        refreshWindowEndedAt: window.endedAt,
-        startedAt,
-        completedAt: this.now(),
-        status: "skipped_duplicate",
-        topicsFound: 0,
-        inputTokens: 0,
-        cachedInputTokens: 0,
-        outputTokens: 0,
-        webSearchCalls: 0,
-        estimatedCostUsd: 0,
-        raw: { reason: "refresh already running or successful for this source/model/window" }
-      });
-      return [];
-    }
+    const runId = claim.run.id;
 
     let responsePayload: OpenAiResponsePayload | undefined;
     try {
@@ -367,7 +347,7 @@ export class OpenAiMemeTrendSource implements TrendSource {
         ? usageFromResponse(responsePayload)
         : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
       const webSearchCalls = responsePayload ? countWebSearchCalls(responsePayload) : 0;
-      const estimatedCostUsd = responsePayload ? estimateOpenAiTrendCost({ model: this.model, ...usage, webSearchCalls }) : 0;
+      const estimatedCostUsd = responsePayload ? estimateOpenAiTrendCost({ model: this.model, ...usage, webSearchCalls }) : this.estimatedRefreshCostUsd;
       await this.recordRun({
         id: runId,
         source: this.name,
@@ -429,40 +409,24 @@ export class OpenAiMemeTrendSource implements TrendSource {
     };
   }
 
-  private async currentSpend(now: Date): Promise<{ day: number; month: number }> {
-    if (!this.options.store) return { day: 0, month: 0 };
-    const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const [dayRuns, monthRuns] = await Promise.all([
-      this.options.store.listTrendRefreshRuns(dayStart, now),
-      this.options.store.listTrendRefreshRuns(monthStart, now)
-    ]);
-    return {
-      day: sumBillableRuns(dayRuns),
-      month: sumBillableRuns(monthRuns)
-    };
-  }
-
-  private async hasSuccessfulRunForWindow(startedAt: Date, endedAt: Date): Promise<boolean> {
-    if (!this.options.store) return false;
-    const runs = await this.options.store.listTrendRefreshRuns(startedAt, endedAt);
-    return runs.some(
-      (run) =>
-        run.source === this.name &&
-        run.model === this.model &&
-        run.promptVersion === OPENAI_MEME_RADAR_PROMPT_VERSION &&
-        run.refreshWindowStartedAt.getTime() === startedAt.getTime() &&
-        run.status === "success"
-    );
-  }
-
   private async recordRun(run: TrendRefreshRun): Promise<void> {
     await this.options.store?.insertTrendRefreshRun(run);
   }
 
-  private async tryStartRun(run: TrendRefreshRun): Promise<boolean> {
-    if (!this.options.store) return true;
-    return this.options.store.tryStartTrendRefreshRun(run);
+  private async claimRun(run: TrendRefreshRun): Promise<TrendRefreshClaimResult> {
+    if (!this.options.store) {
+      if (this.estimatedRefreshCostUsd > this.dailyBudgetUsd || this.estimatedRefreshCostUsd > this.monthlyBudgetUsd) {
+        return { status: "budget_exceeded", daySpendUsd: 0, monthSpendUsd: 0 };
+      }
+      return { status: "claimed", run, daySpendUsd: 0, monthSpendUsd: 0 };
+    }
+    return this.options.store.claimTrendRefreshRun(run, {
+      now: run.startedAt,
+      estimatedRefreshCostUsd: this.estimatedRefreshCostUsd,
+      dailyBudgetUsd: this.dailyBudgetUsd,
+      monthlyBudgetUsd: this.monthlyBudgetUsd,
+      staleAfterMs: this.staleLeaseMs
+    });
   }
 }
 
@@ -765,10 +729,8 @@ function refreshWindow(now: Date, refreshMinutes: number): { startedAt: Date; en
   return { startedAt, endedAt: new Date(startedAt.getTime() + windowMs) };
 }
 
-function sumBillableRuns(runs: TrendRefreshRun[]): number {
-  return runs
-    .filter((run) => run.status === "success" || run.status === "error")
-    .reduce((sum, run) => sum + run.estimatedCostUsd, 0);
+function trendRefreshAttemptId(baseRunId: string, startedAt: Date): string {
+  return `${baseRunId}:attempt:${startedAt.toISOString()}:${randomUUID()}`;
 }
 
 function pricingForModel(model: string): { inputPerMillion: number; cachedInputPerMillion: number; outputPerMillion: number } {

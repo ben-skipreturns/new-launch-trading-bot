@@ -24,6 +24,20 @@ export interface ListTokenLaunchesOptions {
   order?: "asc" | "desc";
 }
 
+export interface TrendRefreshClaimOptions {
+  now: Date;
+  estimatedRefreshCostUsd: number;
+  dailyBudgetUsd: number;
+  monthlyBudgetUsd: number;
+  staleAfterMs: number;
+}
+
+export type TrendRefreshClaimResult =
+  | { status: "claimed"; run: TrendRefreshRun; daySpendUsd: number; monthSpendUsd: number }
+  | { status: "duplicate_success"; run: TrendRefreshRun }
+  | { status: "already_running"; run: TrendRefreshRun }
+  | { status: "budget_exceeded"; daySpendUsd: number; monthSpendUsd: number };
+
 export interface Store {
   upsertRawEvent(event: LaunchEvent): Promise<void>;
   upsertTokenLaunch(launch: TokenLaunch): Promise<void>;
@@ -36,7 +50,7 @@ export interface Store {
   insertExitEvent(event: ExitEvent): Promise<void>;
   upsertTrendTopic(topic: TrendTopic): Promise<void>;
   insertTrendObservation(observation: TrendObservation, topicId?: string): Promise<void>;
-  tryStartTrendRefreshRun(run: TrendRefreshRun): Promise<boolean>;
+  claimTrendRefreshRun(run: TrendRefreshRun, options: TrendRefreshClaimOptions): Promise<TrendRefreshClaimResult>;
   insertTrendRefreshRun(run: TrendRefreshRun): Promise<void>;
   upsertStreamHealthRun(run: StreamHealthRun): Promise<void>;
   upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void>;

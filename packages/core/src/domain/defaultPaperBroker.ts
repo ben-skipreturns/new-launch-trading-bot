@@ -75,7 +75,14 @@ export class DefaultPaperBroker implements PaperBroker {
     }
 
     const launch = await store.getTokenLaunch(score.mint);
-    const exposureRejectReason = await this.exposureRejectReason(store, score, launch, openPositions);
+    const filledBuyOrders = (await store.listPaperOrders(undefined, score.asOf)).filter(
+      (order) => order.side === "buy" && order.status === "filled"
+    );
+    if (filledBuyOrders.some((order) => order.mint === score.mint)) {
+      return this.reject(store, score, "REPEAT_MINT_ENTRY");
+    }
+
+    const exposureRejectReason = await this.exposureRejectReason(store, score, launch, openPositions, filledBuyOrders);
     if (exposureRejectReason) return this.reject(store, score, exposureRejectReason);
 
     const spentToday = await this.spentOnDay(store, score.asOf);
@@ -233,11 +240,14 @@ export class DefaultPaperBroker implements PaperBroker {
     return amount * (bps / 10_000);
   }
 
-  private async exposureRejectReason(store: Store, score: ScoreSnapshot, launch: TokenLaunch | undefined, openPositions: PaperPosition[]): Promise<string | null> {
+  private async exposureRejectReason(
+    store: Store,
+    score: ScoreSnapshot,
+    launch: TokenLaunch | undefined,
+    openPositions: PaperPosition[],
+    filledBuyOrders: PaperOrder[]
+  ): Promise<string | null> {
     const openMints = new Set(openPositions.map((position) => position.mint));
-    const filledBuyOrders = (await store.listPaperOrders(undefined, score.asOf)).filter(
-      (order) => order.side === "buy" && order.status === "filled"
-    );
 
     const topicKey = topicExposureKey(score);
     if (topicKey) {

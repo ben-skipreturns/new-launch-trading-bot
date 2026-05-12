@@ -220,7 +220,7 @@ export interface TrendTopic {
   raw: JsonValue;
 }
 
-export type TrendRefreshRunStatus = "running" | "success" | "error" | "skipped_budget" | "skipped_duplicate";
+export type TrendRefreshRunStatus = "running" | "success" | "error" | "abandoned" | "skipped_budget" | "skipped_duplicate";
 
 export interface TrendRefreshRun {
   id: string;

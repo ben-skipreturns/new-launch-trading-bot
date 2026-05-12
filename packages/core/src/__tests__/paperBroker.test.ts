@@ -53,6 +53,19 @@ describe("DefaultPaperBroker", () => {
     expect(orders.map((order) => order.reason)).toContain("stop_loss");
   });
 
+  it("rejects repeat entries for a mint after the original position closes", async () => {
+    const store = new MemoryStore();
+    const broker = new DefaultPaperBroker(store);
+    await broker.onScore(score("paper_buy", 0.000001, "2026-05-08T12:00:00.000Z"));
+    await broker.onPrice(score("watch", 0.00000019, "2026-05-08T12:10:00.000Z"));
+
+    const repeat = await broker.onScore(score("paper_buy", 0.0000012, "2026-05-08T12:20:00.000Z"));
+
+    expect(repeat?.status).toBe("rejected");
+    expect(repeat?.reason).toBe("REPEAT_MINT_ENTRY");
+    expect(await store.listOpenPositions()).toHaveLength(0);
+  });
+
   it("does not exit positions on stale price snapshots", async () => {
     const store = new MemoryStore();
     const broker = new DefaultPaperBroker(store);

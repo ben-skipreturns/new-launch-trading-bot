@@ -508,8 +508,8 @@ async function getTrendRadarHealth(): Promise<TrendRadarHealth> {
     query<TrendRefreshRunRow>(`select * from trend_refresh_runs order by started_at desc limit 1`),
     query<{ today_cost_usd: string; month_cost_usd: string }>(
       `select
-         coalesce(sum(estimated_cost_usd) filter (where status = 'success' and started_at >= $1), 0)::text as today_cost_usd,
-         coalesce(sum(estimated_cost_usd) filter (where status = 'success' and started_at >= $2), 0)::text as month_cost_usd
+         coalesce(sum(estimated_cost_usd) filter (where status in ('running', 'success', 'error', 'abandoned') and started_at >= $1), 0)::text as today_cost_usd,
+         coalesce(sum(estimated_cost_usd) filter (where status in ('running', 'success', 'error', 'abandoned') and started_at >= $2), 0)::text as month_cost_usd
        from trend_refresh_runs`,
       [dayStart, monthStart]
     )

@@ -17,7 +17,7 @@ import type {
   TrendObservation,
   TrendTopic
 } from "../domain/types.js";
-import type { Store } from "./store.js";
+import type { Store, TrendRefreshClaimOptions, TrendRefreshClaimResult } from "./store.js";
 import type { ListTokenLaunchesOptions } from "./store.js";
 
 export class MemoryStore implements Store {
@@ -37,6 +37,7 @@ export class MemoryStore implements Store {
   readonly memeMatches: TokenMemeMatch[] = [];
   readonly retentionRuns: RetentionRun[] = [];
   private paperBrokerLock: Promise<void> = Promise.resolve();
+  private trendRefreshLock: Promise<void> = Promise.resolve();
 
   async upsertRawEvent(event: LaunchEvent): Promise<void> {
     this.rawEvents.set(`${event.source}:${event.signature}:${event.eventType}`, event);
@@ -94,18 +95,32 @@ export class MemoryStore implements Store {
     }
   }
 
-  async tryStartTrendRefreshRun(run: TrendRefreshRun): Promise<boolean> {
-    const existing = this.trendRefreshRuns.find(
-      (item) =>
-        item.source === run.source &&
-        item.model === run.model &&
-        item.promptVersion === run.promptVersion &&
-        item.refreshWindowStartedAt.getTime() === run.refreshWindowStartedAt.getTime() &&
-        (item.status === "running" || item.status === "success")
-    );
-    if (existing) return false;
-    await this.insertTrendRefreshRun(run);
-    return true;
+  async claimTrendRefreshRun(run: TrendRefreshRun, options: TrendRefreshClaimOptions): Promise<TrendRefreshClaimResult> {
+    return this.withTrendRefreshLock(async () => {
+      this.abandonStaleTrendRefreshRuns(run, options);
+      const matchingRuns = this.trendRefreshRuns.filter((item) => sameTrendRefreshWindow(item, run));
+      const successfulRun = matchingRuns.find((item) => item.status === "success");
+      if (successfulRun) return { status: "duplicate_success", run: successfulRun };
+      const runningRun = matchingRuns.find((item) => item.status === "running");
+      if (runningRun) return { status: "already_running", run: runningRun };
+
+      const spend = this.trendRefreshSpend(options.now);
+      if (
+        spend.day + options.estimatedRefreshCostUsd > options.dailyBudgetUsd ||
+        spend.month + options.estimatedRefreshCostUsd > options.monthlyBudgetUsd
+      ) {
+        return { status: "budget_exceeded", daySpendUsd: spend.day, monthSpendUsd: spend.month };
+      }
+
+      const claimedRun: TrendRefreshRun = {
+        ...run,
+        status: "running",
+        estimatedCostUsd: options.estimatedRefreshCostUsd,
+        raw: { ...(isRecord(run.raw) ? run.raw : {}), reservedCostUsd: options.estimatedRefreshCostUsd }
+      };
+      await this.insertTrendRefreshRun(claimedRun);
+      return { status: "claimed", run: claimedRun, daySpendUsd: spend.day, monthSpendUsd: spend.month };
+    });
   }
 
   async insertTrendRefreshRun(run: TrendRefreshRun): Promise<void> {
@@ -151,6 +166,47 @@ export class MemoryStore implements Store {
     } finally {
       release();
     }
+  }
+
+  private async withTrendRefreshLock<T>(run: () => Promise<T>): Promise<T> {
+    const previous = this.trendRefreshLock;
+    let release!: () => void;
+    this.trendRefreshLock = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  }
+
+  private abandonStaleTrendRefreshRuns(run: TrendRefreshRun, options: TrendRefreshClaimOptions): void {
+    const staleBefore = options.now.getTime() - options.staleAfterMs;
+    this.trendRefreshRuns.forEach((item, index) => {
+      if (!sameTrendRefreshWindow(item, run) || item.status !== "running" || item.startedAt.getTime() >= staleBefore) return;
+      this.trendRefreshRuns[index] = {
+        ...item,
+        status: "abandoned",
+        completedAt: options.now,
+        errorText: item.errorText ?? "Trend refresh lease expired before completion.",
+        raw: {
+          ...(isRecord(item.raw) ? item.raw : {}),
+          abandonedAt: options.now.toISOString(),
+          abandonedReason: "stale_running_lease"
+        }
+      };
+    });
+  }
+
+  private trendRefreshSpend(now: Date): { day: number; month: number } {
+    const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    return {
+      day: sumBillableTrendRefreshRuns(this.trendRefreshRuns.filter((run) => run.startedAt >= dayStart && run.startedAt <= now)),
+      month: sumBillableTrendRefreshRuns(this.trendRefreshRuns.filter((run) => run.startedAt >= monthStart && run.startedAt <= now))
+    };
   }
 
   async getTokenLaunch(mint: string): Promise<TokenLaunch | undefined> {
@@ -352,4 +408,23 @@ function isExpired(
 ): boolean {
   const cutoff = mint && interestingMints.has(mint) ? interestingCutoff : rejectedCutoff;
   return date.getTime() < cutoff;
+}
+
+function sameTrendRefreshWindow(a: TrendRefreshRun, b: TrendRefreshRun): boolean {
+  return (
+    a.source === b.source &&
+    a.model === b.model &&
+    a.promptVersion === b.promptVersion &&
+    a.refreshWindowStartedAt.getTime() === b.refreshWindowStartedAt.getTime()
+  );
+}
+
+function sumBillableTrendRefreshRuns(runs: TrendRefreshRun[]): number {
+  return runs
+    .filter((run) => run.status === "running" || run.status === "success" || run.status === "error" || run.status === "abandoned")
+    .reduce((sum, run) => sum + run.estimatedCostUsd, 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

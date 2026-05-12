@@ -21,7 +21,7 @@ import type {
   TrendTopic
 } from "../domain/types.js";
 import type { Store } from "./store.js";
-import type { ListTokenLaunchesOptions } from "./store.js";
+import type { ListTokenLaunchesOptions, TrendRefreshClaimOptions, TrendRefreshClaimResult } from "./store.js";
 
 interface RawEventsTable {
   id: Generated<number>;
@@ -676,38 +676,77 @@ export class PostgresStore implements Store {
       .execute();
   }
 
-  async tryStartTrendRefreshRun(run: TrendRefreshRun): Promise<boolean> {
-    const insertRun = async (db: Kysely<Database>): Promise<boolean> => {
-      const updated = await sql<{ id: string }>`
+  async claimTrendRefreshRun(run: TrendRefreshRun, options: TrendRefreshClaimOptions): Promise<TrendRefreshClaimResult> {
+    const claimRun = async (db: Kysely<Database>): Promise<TrendRefreshClaimResult> => {
+      const staleBefore = new Date(options.now.getTime() - options.staleAfterMs);
+      await sql`
         update trend_refresh_runs set
-          started_at = ${run.startedAt},
-          completed_at = ${run.completedAt ?? null},
-          status = ${run.status},
-          topics_found = ${run.topicsFound},
-          input_tokens = ${run.inputTokens},
-          cached_input_tokens = ${run.cachedInputTokens},
-          output_tokens = ${run.outputTokens},
-          web_search_calls = ${run.webSearchCalls},
-          estimated_cost_usd = ${String(run.estimatedCostUsd)},
-          response_id = ${run.responseId ?? null},
-          error_text = ${run.errorText ?? null},
-          raw = ${run.raw}::jsonb
-        where id = ${run.id}
-          and status not in ('running', 'success')
-          and not exists (
-            select 1
-            from trend_refresh_runs active_run
-            where active_run.source = ${run.source}
-              and active_run.model = ${run.model}
-              and active_run.prompt_version = ${run.promptVersion}
-              and active_run.refresh_window_started_at = ${run.refreshWindowStartedAt}
-              and active_run.status in ('running', 'success')
-              and active_run.id <> ${run.id}
-          )
-        returning id
+          status = 'abandoned',
+          completed_at = ${options.now},
+          error_text = coalesce(error_text, 'Trend refresh lease expired before completion.'),
+          raw = raw || ${{
+            abandonedAt: options.now.toISOString(),
+            abandonedReason: "stale_running_lease"
+          }}::jsonb
+        where source = ${run.source}
+          and model = ${run.model}
+          and prompt_version = ${run.promptVersion}
+          and refresh_window_started_at = ${run.refreshWindowStartedAt}
+          and status = 'running'
+          and started_at < ${staleBefore}
       `.execute(db);
-      if (updated.rows.length > 0) return true;
 
+      const successfulRun = await db
+        .selectFrom("trend_refresh_runs")
+        .selectAll()
+        .where("source", "=", run.source)
+        .where("model", "=", run.model)
+        .where("prompt_version", "=", run.promptVersion)
+        .where("refresh_window_started_at", "=", run.refreshWindowStartedAt)
+        .where("status", "=", "success")
+        .orderBy("completed_at", "desc")
+        .executeTakeFirst();
+      if (successfulRun) return { status: "duplicate_success", run: trendRefreshRunFromRow(successfulRun) };
+
+      const runningRun = await db
+        .selectFrom("trend_refresh_runs")
+        .selectAll()
+        .where("source", "=", run.source)
+        .where("model", "=", run.model)
+        .where("prompt_version", "=", run.promptVersion)
+        .where("refresh_window_started_at", "=", run.refreshWindowStartedAt)
+        .where("status", "=", "running")
+        .orderBy("started_at", "desc")
+        .executeTakeFirst();
+      if (runningRun) return { status: "already_running", run: trendRefreshRunFromRow(runningRun) };
+
+      const dayStart = new Date(Date.UTC(options.now.getUTCFullYear(), options.now.getUTCMonth(), options.now.getUTCDate()));
+      const monthStart = new Date(Date.UTC(options.now.getUTCFullYear(), options.now.getUTCMonth(), 1));
+      const spend = await sql<{ day_spend_usd: string; month_spend_usd: string }>`
+        select
+          coalesce(sum(estimated_cost_usd) filter (
+            where status in ('running', 'success', 'error', 'abandoned') and started_at >= ${dayStart} and started_at <= ${options.now}
+          ), 0)::text as day_spend_usd,
+          coalesce(sum(estimated_cost_usd) filter (
+            where status in ('running', 'success', 'error', 'abandoned') and started_at >= ${monthStart} and started_at <= ${options.now}
+          ), 0)::text as month_spend_usd
+        from trend_refresh_runs
+      `.execute(db);
+      const daySpendUsd = Number(spend.rows[0]?.day_spend_usd ?? 0);
+      const monthSpendUsd = Number(spend.rows[0]?.month_spend_usd ?? 0);
+      if (
+        daySpendUsd + options.estimatedRefreshCostUsd > options.dailyBudgetUsd ||
+        monthSpendUsd + options.estimatedRefreshCostUsd > options.monthlyBudgetUsd
+      ) {
+        return { status: "budget_exceeded", daySpendUsd, monthSpendUsd };
+      }
+
+      const claimedRun: TrendRefreshRun = {
+        ...run,
+        status: "running",
+        estimatedCostUsd: options.estimatedRefreshCostUsd,
+        raw: { ...(isJsonObject(run.raw) ? run.raw : {}), reservedCostUsd: options.estimatedRefreshCostUsd }
+      };
       const inserted = await sql<{ id: string }>`
         insert into trend_refresh_runs (
           id,
@@ -730,36 +769,64 @@ export class PostgresStore implements Store {
           raw
         )
         values (
-          ${run.id},
-          ${run.source},
-          ${run.model},
-          ${run.promptVersion},
-          ${run.refreshWindowStartedAt},
-          ${run.refreshWindowEndedAt},
-          ${run.startedAt},
-          ${run.completedAt ?? null},
-          ${run.status},
-          ${run.topicsFound},
-          ${run.inputTokens},
-          ${run.cachedInputTokens},
-          ${run.outputTokens},
-          ${run.webSearchCalls},
-          ${String(run.estimatedCostUsd)},
-          ${run.responseId ?? null},
-          ${run.errorText ?? null},
-          ${run.raw}::jsonb
+          ${claimedRun.id},
+          ${claimedRun.source},
+          ${claimedRun.model},
+          ${claimedRun.promptVersion},
+          ${claimedRun.refreshWindowStartedAt},
+          ${claimedRun.refreshWindowEndedAt},
+          ${claimedRun.startedAt},
+          ${claimedRun.completedAt ?? null},
+          ${claimedRun.status},
+          ${claimedRun.topicsFound},
+          ${claimedRun.inputTokens},
+          ${claimedRun.cachedInputTokens},
+          ${claimedRun.outputTokens},
+          ${claimedRun.webSearchCalls},
+          ${String(claimedRun.estimatedCostUsd)},
+          ${claimedRun.responseId ?? null},
+          ${claimedRun.errorText ?? null},
+          ${claimedRun.raw}::jsonb
         )
         on conflict do nothing
         returning id
       `.execute(db);
-      return inserted.rows.length > 0;
+      if (inserted.rows.length === 0) {
+        const currentSuccessfulRun = await db
+          .selectFrom("trend_refresh_runs")
+          .selectAll()
+          .where("source", "=", run.source)
+          .where("model", "=", run.model)
+          .where("prompt_version", "=", run.promptVersion)
+          .where("refresh_window_started_at", "=", run.refreshWindowStartedAt)
+          .where("status", "=", "success")
+          .orderBy("completed_at", "desc")
+          .executeTakeFirst();
+        if (currentSuccessfulRun) return { status: "duplicate_success", run: trendRefreshRunFromRow(currentSuccessfulRun) };
+        const currentRun = await db
+          .selectFrom("trend_refresh_runs")
+          .selectAll()
+          .where("source", "=", run.source)
+          .where("model", "=", run.model)
+          .where("prompt_version", "=", run.promptVersion)
+          .where("refresh_window_started_at", "=", run.refreshWindowStartedAt)
+          .where("status", "=", "running")
+          .orderBy("started_at", "desc")
+          .executeTakeFirst();
+        if (currentRun) return { status: "already_running", run: trendRefreshRunFromRow(currentRun) };
+        return { status: "budget_exceeded", daySpendUsd, monthSpendUsd };
+      }
+      return { status: "claimed", run: claimedRun, daySpendUsd, monthSpendUsd };
     };
 
-    if (!this.ownsConnection) return insertRun(this.db);
+    if (!this.ownsConnection) {
+      await sql`select pg_advisory_xact_lock(904206428, 2)`.execute(this.db);
+      return claimRun(this.db);
+    }
 
     return this.db.transaction().execute(async (trx) => {
       await sql`select pg_advisory_xact_lock(904206428, 2)`.execute(trx);
-      return insertRun(trx as unknown as Kysely<Database>);
+      return claimRun(trx as unknown as Kysely<Database>);
     });
   }
 
@@ -1295,6 +1362,10 @@ function tokenMemeMatchFromRow(row: Selectable<TokenMemeMatchesTable>): TokenMem
 
 function hydrateFeatureDates(features: FeatureSnapshot): FeatureSnapshot {
   return { ...features, asOf: new Date(features.asOf) };
+}
+
+function isJsonObject(value: JsonValue): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function countOrDeleteExpiredRawEvents(
