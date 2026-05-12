@@ -3,10 +3,12 @@ import "server-only";
 import { Pool } from "pg";
 import type { ExitEvent, PaperOrder, ScoreSnapshot } from "@moonshot/core";
 import { calculateDashboardMetrics, calculatePositionDerivedValues } from "./aggregate";
+import { buildDecisionReview, emptyDecisionReview, type DecisionBuyOrderInput, type DecisionRawCounts } from "./decision-review";
 import { loadWorkspaceEnv } from "./env";
 import type {
   DashboardSummary,
   DataState,
+  DecisionReview,
   LaunchDetail,
   PositionListItem,
   RadarReview,
@@ -68,6 +70,18 @@ export async function getLaunchList(sort: "latest" | "meme" | "risk" | "ev" = "l
     if (sort === "risk") return launches.sort((a, b) => b.riskScore - a.riskScore);
     if (sort === "ev") return launches.sort((a, b) => b.expectedValueScore - a.expectedValueScore);
     return launches;
+  });
+}
+
+export async function getDecisionReview(): Promise<DataState<DecisionReview>> {
+  return safeRead(emptyDecisionReview(), async () => {
+    const [launches, rawCounts, buyOrders, positions] = await Promise.all([
+      getLaunches(5000),
+      getDecisionRawCounts(),
+      getDecisionBuyOrders(),
+      getPositions(1000)
+    ]);
+    return buildDecisionReview({ launches, rawCounts, buyOrders, positions });
   });
 }
 
@@ -449,6 +463,38 @@ async function getOrderCounts(): Promise<{ filledBuys: number; filledSells: numb
   };
 }
 
+async function getDecisionRawCounts(): Promise<DecisionRawCounts> {
+  const rows = await query<DecisionRawCountsRow>(
+    `select
+       (select count(*)::text from token_launches) as total_launches,
+       (select count(distinct mint)::text from token_meme_matches) as meme_matched_launches,
+       (select count(*)::text from exit_events) as exit_events`
+  );
+  const row = rows[0];
+  return {
+    totalLaunches: Number(row?.total_launches ?? 0),
+    memeMatchedLaunches: Number(row?.meme_matched_launches ?? 0),
+    exitEvents: Number(row?.exit_events ?? 0)
+  };
+}
+
+async function getDecisionBuyOrders(): Promise<DecisionBuyOrderInput[]> {
+  const rows = await query<DecisionBuyOrderRow>(
+    `select mint, status, reason, created_at, score_snapshot
+     from paper_orders
+     where side = 'buy'
+     order by created_at desc
+     limit 5000`
+  );
+  return rows.map((row) => ({
+    mint: row.mint,
+    status: row.status,
+    reason: row.reason,
+    createdAt: row.created_at,
+    scoreReasons: Array.isArray(row.score_snapshot?.reasons) ? row.score_snapshot.reasons : []
+  }));
+}
+
 async function getHealth(): Promise<DashboardSummary["health"]> {
   const rows = await query<{
     latest_raw_event_at: Date | null;
@@ -679,6 +725,20 @@ interface RawLaunchStatsRow {
   latest_created_at: Date | null;
 }
 
+interface DecisionRawCountsRow {
+  total_launches: string;
+  meme_matched_launches: string;
+  exit_events: string;
+}
+
+interface DecisionBuyOrderRow {
+  mint: string;
+  status: "filled" | "rejected";
+  reason: string;
+  created_at: Date;
+  score_snapshot: ScoreSnapshot | null;
+}
+
 interface StreamHealthRow {
   id: string;
   source: string;
@@ -710,6 +770,9 @@ interface PositionRow {
   tokens_bought: string;
   sol_invested: string;
   sol_realized: string;
+  stop_price_sol: string;
+  high_price_sol: string;
+  ladder_state: unknown;
   name: string | null;
   symbol: string | null;
   feature_snapshot: ScoreSnapshot["features"] | null;
@@ -930,6 +993,9 @@ function positionFromRow(row: PositionRow): PositionListItem {
     tokensBought,
     solInvested,
     solRealized,
+    stopPriceSol: numericValue(row.stop_price_sol),
+    highPriceSol: numericValue(row.high_price_sol),
+    ladderState: booleanRecord(row.ladder_state),
     ...derived
   };
 }
@@ -1236,6 +1302,11 @@ function numericValue(value: string | null): number | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function booleanRecord(value: unknown): Record<string, boolean> | undefined {
+  if (!isRecord(value)) return undefined;
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

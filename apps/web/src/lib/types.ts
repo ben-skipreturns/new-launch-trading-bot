@@ -185,6 +185,9 @@ export interface PositionListItem {
   estimatedOpenValueSol: number;
   estimatedPnlSol: number;
   moonbagPct: number;
+  stopPriceSol?: number;
+  highPriceSol?: number;
+  ladderState?: Record<string, boolean>;
 }
 
 export interface TopicListItem {
@@ -216,6 +219,99 @@ export interface DashboardSummary {
   openPositions: PositionListItem[];
   activeTopics: TopicListItem[];
   recentExits: ExitEvent[];
+}
+
+export interface DecisionFunnelStep {
+  key: string;
+  label: string;
+  count: number;
+  previousCount?: number;
+  description: string;
+}
+
+export interface DecisionReasonCount {
+  reason: string;
+  count: number;
+}
+
+export interface GateBlockedLaunch {
+  mint: string;
+  name?: string;
+  symbol?: string;
+  decision: Decision | "none";
+  latestScoreAt?: Date;
+  memeRelevanceScore: number;
+  riskScore: number;
+  expectedValueScore: number;
+  reasons: string[];
+  blockedBy?: string;
+}
+
+export interface DecisionGateBreakdown {
+  key: string;
+  label: string;
+  description: string;
+  inputCount: number;
+  passed: number;
+  blocked: number;
+  reasonCounts: DecisionReasonCount[];
+  recentBlocked: GateBlockedLaunch[];
+}
+
+export interface AlmostBuyItem extends GateBlockedLaunch {
+  blockedGates: string[];
+}
+
+export interface PaperStrategySummary {
+  buySizeSol: number;
+  dailySpendCapSol: number;
+  maxConcurrentPositions: number;
+  memeThreshold: number;
+  riskThreshold: number;
+  expectedValueThreshold: number;
+  minBuyCount: number;
+  minUniqueTraders: number;
+  minNetSolFlow: number;
+  maxSellPressure: number;
+  minBondingCurveProgress: number;
+  maxEntryAgeSeconds: number;
+  stopLossPct: number;
+  timeoutHours: number;
+  trailingStopActivationMultiple: number;
+  trailingStopDrawdownPct: number;
+  exposureCaps: string[];
+  exitLadder: Array<{
+    multiple: number;
+    portion: number;
+    label: string;
+  }>;
+}
+
+export interface PositionLifecycleItem {
+  mint: string;
+  name?: string;
+  symbol?: string;
+  status: PaperPosition["status"];
+  openedAt: Date;
+  entryPriceSol: number;
+  latestPriceSol?: number;
+  currentMultiple?: number;
+  moonbagPct: number;
+  estimatedPnlSol: number;
+  ladderHits: string[];
+  nextExitTrigger: string;
+  stopState: string;
+  timeoutState: string;
+  entryReasons: string[];
+}
+
+export interface DecisionReview {
+  generatedAt: Date;
+  funnel: DecisionFunnelStep[];
+  gates: DecisionGateBreakdown[];
+  almostBuys: AlmostBuyItem[];
+  strategy: PaperStrategySummary;
+  positionLifecycle: PositionLifecycleItem[];
 }
 
 export interface LaunchDetail {
