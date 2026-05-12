@@ -577,36 +577,64 @@ export class PostgresStore implements Store {
   }
 
   async upsertTrendTopic(topic: TrendTopic): Promise<void> {
-    await this.db
-      .insertInto("trend_topics")
-      .values({
-        id: topic.id,
-        canonical_phrase: topic.canonicalPhrase,
-        aliases: topic.aliases,
-        topic_type: topic.topicType,
-        source_coverage: topic.sourceCoverage,
-        velocity_score: String(topic.velocityScore),
-        novelty_score: String(topic.noveltyScore),
-        geo: topic.geo ?? null,
-        first_seen: topic.firstSeen,
-        last_seen: topic.lastSeen,
-        evidence_urls: topic.evidenceUrls,
-        raw: topic.raw
-      })
-      .onConflict((oc) =>
-        oc.column("id").doUpdateSet({
-          aliases: topic.aliases,
-          source_coverage: topic.sourceCoverage,
-          velocity_score: String(topic.velocityScore),
-          novelty_score: String(topic.noveltyScore),
-          geo: topic.geo ?? null,
-          first_seen: topic.firstSeen,
-          last_seen: topic.lastSeen,
-          evidence_urls: topic.evidenceUrls,
-          raw: topic.raw
-        })
+    await sql`
+      insert into trend_topics (
+        id,
+        canonical_phrase,
+        aliases,
+        topic_type,
+        source_coverage,
+        velocity_score,
+        novelty_score,
+        geo,
+        first_seen,
+        last_seen,
+        evidence_urls,
+        raw
       )
-      .execute();
+      values (
+        ${topic.id},
+        ${topic.canonicalPhrase},
+        ${topic.aliases}::text[],
+        ${topic.topicType},
+        ${topic.sourceCoverage},
+        ${String(topic.velocityScore)},
+        ${String(topic.noveltyScore)},
+        ${topic.geo ?? null},
+        ${topic.firstSeen},
+        ${topic.lastSeen},
+        ${topic.evidenceUrls}::text[],
+        ${topic.raw}::jsonb
+      )
+      on conflict (id) do update set
+        canonical_phrase = excluded.canonical_phrase,
+        aliases = (
+          select coalesce(array_agg(alias_value order by alias_value), '{}'::text[])
+          from (
+            select distinct alias_value
+            from unnest(coalesce(trend_topics.aliases, '{}'::text[]) || coalesce(excluded.aliases, '{}'::text[])) as merged(alias_value)
+            where alias_value <> ''
+          ) merged_aliases
+        ),
+        topic_type = excluded.topic_type,
+        source_coverage = greatest(trend_topics.source_coverage, excluded.source_coverage),
+        velocity_score = excluded.velocity_score,
+        novelty_score = excluded.novelty_score,
+        geo = excluded.geo,
+        first_seen = least(trend_topics.first_seen, excluded.first_seen),
+        last_seen = greatest(trend_topics.last_seen, excluded.last_seen),
+        evidence_urls = (
+          select coalesce(array_agg(url_value order by url_value), '{}'::text[])
+          from (
+            select distinct url_value
+            from unnest(coalesce(trend_topics.evidence_urls, '{}'::text[]) || coalesce(excluded.evidence_urls, '{}'::text[])) as merged(url_value)
+            where url_value <> ''
+            order by url_value
+            limit 10
+          ) merged_urls
+        ),
+        raw = excluded.raw
+    `.execute(this.db);
   }
 
   async insertTrendObservation(observation: TrendObservation, topicId?: string): Promise<void> {

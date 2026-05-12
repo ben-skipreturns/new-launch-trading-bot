@@ -85,7 +85,7 @@ program
       const trendSource = parseReplaySourceOption(options.trendSource, "--trend-source");
       const enrichmentSource = parseReplaySourceOption(options.enrichmentSource, "--enrichment-source");
       if (trendSource === "fixture") await refreshTrends(store, fixtureTrendSources());
-      else await refreshLiveTrendsOrFail(store);
+      else await refreshLiveTrendsOrFailWithTimeout(store);
       const result = await runReplay(options.fixture, store, enrichmentSource === "fixture" ? fixtureEnricher() : liveEnricher());
       const report = await generateDailyReport(store);
       await writeText(options.report, report);
@@ -130,7 +130,7 @@ program
       }
 
       if (health) await store.upsertStreamHealthRun(health);
-      await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
+      await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends });
       const feed = createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health));
       const pipeline = createPipeline(store, liveEnricher());
       const durationMs = Number(options.durationSeconds) * 1000;
@@ -203,7 +203,7 @@ program
     try {
       const result = options.fixture
         ? await refreshTrends(store, fixtureTrendSources())
-        : await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
+        : await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends });
       console.log(`Stored ${result.observations.length} trend observations and ${result.topics.length} topics.`);
       if (!options.fixture) await printLatestTrendRefreshRun(store);
     } finally {
@@ -648,8 +648,71 @@ function createStreamStatusHandler(store: Store | undefined, health: StreamHealt
     if (event.lastEventAt) health.lastEventAt = event.lastEventAt;
     updateStreamHealthMetrics(health);
     appendStreamRawStatus(health, event);
-    if (store) void store.upsertStreamHealthRun(health).catch(() => undefined);
+    scheduleStreamHealthPersist(store, health);
   };
+}
+
+interface StreamHealthPersistState {
+  timeout?: NodeJS.Timeout;
+  inFlight?: Promise<void>;
+  pending: boolean;
+}
+
+const streamHealthPersistStates = new WeakMap<StreamHealthRun, StreamHealthPersistState>();
+const STREAM_HEALTH_FLUSH_MS = 1000;
+
+function streamHealthPersistState(health: StreamHealthRun): StreamHealthPersistState {
+  let state = streamHealthPersistStates.get(health);
+  if (!state) {
+    state = { pending: false };
+    streamHealthPersistStates.set(health, state);
+  }
+  return state;
+}
+
+function scheduleStreamHealthPersist(store: Store | undefined, health: StreamHealthRun | undefined, delayMs = STREAM_HEALTH_FLUSH_MS): void {
+  if (!store || !health) return;
+  const state = streamHealthPersistState(health);
+  state.pending = true;
+  if (state.timeout) return;
+  state.timeout = setTimeout(() => {
+    state.timeout = undefined;
+    void flushStreamHealthPersist(store, health).catch(() => undefined);
+  }, delayMs);
+}
+
+async function flushStreamHealthPersist(store: Store, health: StreamHealthRun): Promise<void> {
+  const state = streamHealthPersistState(health);
+  if (state.timeout) {
+    clearTimeout(state.timeout);
+    state.timeout = undefined;
+  }
+  if (state.inFlight) {
+    state.pending = true;
+    await state.inFlight.catch(() => undefined);
+    return;
+  }
+
+  state.pending = false;
+  state.inFlight = store.upsertStreamHealthRun(health);
+  try {
+    await state.inFlight;
+  } finally {
+    state.inFlight = undefined;
+    if (state.pending) scheduleStreamHealthPersist(store, health, 0);
+  }
+}
+
+async function persistStreamHealthNow(store: Store | undefined, health: StreamHealthRun): Promise<void> {
+  if (!store) return;
+  const state = streamHealthPersistState(health);
+  if (state.timeout) {
+    clearTimeout(state.timeout);
+    state.timeout = undefined;
+  }
+  state.pending = false;
+  if (state.inFlight) await state.inFlight.catch(() => undefined);
+  await store.upsertStreamHealthRun(health);
 }
 
 async function recordStreamHealthEvent(
@@ -668,7 +731,7 @@ async function recordStreamHealthEvent(
   }
   if (health.status === "stale") health.status = "running";
   updateStreamHealthMetrics(health);
-  if (store) await store.upsertStreamHealthRun(health);
+  scheduleStreamHealthPersist(store, health);
 }
 
 async function finishStreamHealthRun(
@@ -681,7 +744,7 @@ async function finishStreamHealthRun(
   health.disconnectedAt = new Date();
   if (error) health.errorText = error instanceof Error ? error.message : String(error);
   updateStreamHealthMetrics(health);
-  if (store) await store.upsertStreamHealthRun(health);
+  await persistStreamHealthNow(store, health);
 }
 
 async function isDuplicateLaunch(store: Store | undefined, seenLaunches: Set<string>, launch: TokenLaunch): Promise<boolean> {
@@ -835,7 +898,7 @@ async function runMatchStream(
   if (options.fixtureTopics) {
     await refreshTrends(topicStore, fixtureTrendSources());
   } else if (options.refreshTrends) {
-    await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
+    await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends });
   }
   const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
   const matcher = createTokenMemeMatcher(parseNumberOption(options.minScore, "--min-score"), options.fixtureTopics);
@@ -1159,7 +1222,7 @@ async function runStreaming(
         openPositionSnapshotIntervalMs: options.positionCheckMs
       });
       stopBackgroundWork.push(
-        startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, () => supervisor.captureDueSnapshots(), controller, {
+        startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, (signal) => supervisor.captureDueSnapshots(new Date(), signal), controller, {
           onFailure: failRun
         })
       );
@@ -1169,7 +1232,7 @@ async function runStreaming(
         startBackgroundLoop(
           "trend-refresh",
           options.trendRefreshMs,
-          (signal) => refreshLiveTrendsOrFail(options.store as Store, { allowEmptyTopics: options.allowEmptyTrends, signal }),
+          (signal) => refreshLiveTrendsOrFailWithTimeout(options.store as Store, { allowEmptyTopics: options.allowEmptyTrends, signal }),
           controller,
           { runImmediately: false, onFailure: failRun }
         )
@@ -1276,7 +1339,7 @@ function updateStreamProcessingHealth(store: Store | undefined, health: StreamHe
       oldestQueuedMs: metrics.oldestQueuedMs
     }
   };
-  if (store) void store.upsertStreamHealthRun(health).catch(() => undefined);
+  scheduleStreamHealthPersist(store, health);
 }
 
 interface BackgroundLoopHandle {
@@ -1395,6 +1458,35 @@ async function refreshLiveTrendsOrFail(store: Store, options: { allowEmptyTopics
   const result = await new MemeTrendEngine(store, liveTrendSources(store), { failOnAllSourcesError: true }).refresh(options.signal);
   if (!options.allowEmptyTopics) await assertActiveTrendTopics(store);
   return result;
+}
+
+async function refreshLiveTrendsOrFailWithTimeout(
+  store: Store,
+  options: { allowEmptyTopics?: boolean; signal?: AbortSignal; timeoutMs?: number } = {}
+) {
+  const timeoutMs = options.timeoutMs ?? numberEnv("LIVE_TREND_REFRESH_TIMEOUT_MS", 60_000);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const abortFromParent = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
+
+  try {
+    return await refreshLiveTrendsOrFail(store, {
+      allowEmptyTopics: options.allowEmptyTopics,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (timedOut && isAbortError(error)) throw new Error(`Live trend refresh did not complete within ${timeoutMs}ms.`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromParent);
+  }
 }
 
 async function assertActiveTrendTopics(store: Store): Promise<void> {

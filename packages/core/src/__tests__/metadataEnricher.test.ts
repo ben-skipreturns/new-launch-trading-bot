@@ -20,9 +20,11 @@ describe("TokenMetadataEnricher", () => {
           twitter: "https://x.com/moodeng"
         })
     }));
-    vi.stubGlobal("fetch", fetchMock);
 
-    const enrichment = await new TokenMetadataEnricher({ resolveHostname: publicResolver }).enrich(launch("https://example.com/meta.json"));
+    const enrichment = await new TokenMetadataEnricher({
+      resolveHostname: publicResolver,
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("https://example.com/meta.json"));
 
     expect(fetchMock).toHaveBeenCalledWith("https://example.com/meta.json", expect.objectContaining({ redirect: "manual" }));
     expect(enrichment).toMatchObject({
@@ -41,18 +43,23 @@ describe("TokenMetadataEnricher", () => {
       headers: new Headers(),
       text: async () => JSON.stringify({ name: "Peanut", description: "Squirrel meme" })
     }));
-    vi.stubGlobal("fetch", fetchMock);
 
-    await new TokenMetadataEnricher({ ipfsGateway: "https://gateway.example/ipfs/", resolveHostname: publicResolver }).enrich(launch("ipfs://abc123"));
+    await new TokenMetadataEnricher({
+      ipfsGateway: "https://gateway.example/ipfs/",
+      resolveHostname: publicResolver,
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("ipfs://abc123"));
 
     expect(fetchMock).toHaveBeenCalledWith("https://gateway.example/ipfs/abc123", expect.objectContaining({ redirect: "manual" }));
   });
 
   it("blocks direct private metadata URLs before fetch", async () => {
     const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
 
-    const enrichment = await new TokenMetadataEnricher({ resolveHostname: publicResolver }).enrich(launch("http://169.254.169.254/latest/meta-data"));
+    const enrichment = await new TokenMetadataEnricher({
+      resolveHostname: publicResolver,
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("http://169.254.169.254/latest/meta-data"));
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(enrichment).toMatchObject({
@@ -66,9 +73,11 @@ describe("TokenMetadataEnricher", () => {
 
   it("blocks hostnames that resolve to private addresses", async () => {
     const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
 
-    const enrichment = await new TokenMetadataEnricher({ resolveHostname: async () => ["127.0.0.1"] }).enrich(launch("https://evil.example/meta.json"));
+    const enrichment = await new TokenMetadataEnricher({
+      resolveHostname: async () => ["127.0.0.1"],
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("https://evil.example/meta.json"));
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(enrichment).toMatchObject({
@@ -86,9 +95,11 @@ describe("TokenMetadataEnricher", () => {
       status: 302,
       headers: new Headers({ location: "http://127.0.0.1/meta.json" })
     }));
-    vi.stubGlobal("fetch", fetchMock);
 
-    const enrichment = await new TokenMetadataEnricher({ resolveHostname: publicResolver }).enrich(launch("https://example.com/redirect"));
+    const enrichment = await new TokenMetadataEnricher({
+      resolveHostname: publicResolver,
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("https://example.com/redirect"));
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(enrichment).toMatchObject({
@@ -108,15 +119,40 @@ describe("TokenMetadataEnricher", () => {
       headers: new Headers(),
       text: async () => "not json"
     }));
-    vi.stubGlobal("fetch", fetchMock);
 
-    const enrichment = await new TokenMetadataEnricher({ resolveHostname: publicResolver }).enrich(launch("https://example.com/not-json"));
+    const enrichment = await new TokenMetadataEnricher({
+      resolveHostname: publicResolver,
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("https://example.com/not-json"));
 
     expect(enrichment).toMatchObject({
       provider: "token-metadata-uri-failed",
       raw: {
         reason: "invalid_metadata_json",
         finalUrl: "https://example.com/not-json"
+      }
+    });
+  });
+
+  it("caps metadata bodies even when content-length is missing", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify({ name: "x".repeat(100) })
+    }));
+
+    const enrichment = await new TokenMetadataEnricher({
+      resolveHostname: publicResolver,
+      maxBytes: 20,
+      fetchFn: fetchMock as unknown as typeof fetch
+    }).enrich(launch("https://example.com/oversized"));
+
+    expect(enrichment).toMatchObject({
+      provider: "token-metadata-uri-failed",
+      raw: {
+        reason: "metadata_too_large",
+        finalUrl: "https://example.com/oversized"
       }
     });
   });

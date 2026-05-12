@@ -1,3 +1,5 @@
+import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { Enricher } from "../domain/interfaces.js";
@@ -27,6 +29,24 @@ export interface CompositeEnricherOptions {
   perProviderTimeoutMs?: number;
 }
 
+interface MetadataHeaders {
+  get(name: string): string | null;
+}
+
+interface MetadataHttpResponse {
+  ok: boolean;
+  status: number;
+  headers: MetadataHeaders;
+  body: string;
+}
+
+type FetchMetadata = (
+  url: string,
+  address: string,
+  signal: AbortSignal,
+  maxBytes: number
+) => Promise<MetadataHttpResponse | MetadataFetchBlocked>;
+
 export class StaticFixtureEnricher implements Enricher {
   readonly name = "fixture";
 
@@ -54,6 +74,7 @@ export interface TokenMetadataEnricherOptions {
   arweaveGateway?: string;
   maxRedirects?: number;
   resolveHostname?: (hostname: string) => Promise<string[]>;
+  fetchFn?: typeof fetch;
 }
 
 export class TokenMetadataEnricher implements Enricher {
@@ -64,6 +85,7 @@ export class TokenMetadataEnricher implements Enricher {
   private readonly arweaveGateway: string;
   private readonly maxRedirects: number;
   private readonly resolveHostname: (hostname: string) => Promise<string[]>;
+  private readonly fetchMetadata: FetchMetadata;
 
   constructor(options: TokenMetadataEnricherOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 2500;
@@ -72,6 +94,9 @@ export class TokenMetadataEnricher implements Enricher {
     this.arweaveGateway = options.arweaveGateway ?? "https://arweave.net/";
     this.maxRedirects = options.maxRedirects ?? 3;
     this.resolveHostname = options.resolveHostname ?? defaultResolveHostname;
+    this.fetchMetadata = options.fetchFn
+      ? (url, _address, signal, maxBytes) => fetchMetadataWithFetch(options.fetchFn as typeof fetch, url, signal, maxBytes)
+      : fetchPinnedMetadata;
   }
 
   async enrich(launch: TokenLaunch, signal?: AbortSignal): Promise<TokenEnrichment | null> {
@@ -82,7 +107,8 @@ export class TokenMetadataEnricher implements Enricher {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const abortFromParent = () => controller.abort();
-    signal?.addEventListener("abort", abortFromParent, { once: true });
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener("abort", abortFromParent, { once: true });
 
     try {
       const response = await this.fetchWithSafeRedirects(resolvedUrl, controller.signal);
@@ -90,6 +116,7 @@ export class TokenMetadataEnricher implements Enricher {
         return metadataFetchFailure(launch, {
           reason: response.reason,
           resolvedUrl,
+          finalUrl: response.reason === "metadata_too_large" ? response.blockedUrl : undefined,
           blockedUrl: response.blockedUrl,
           redirects: response.redirects
         });
@@ -103,27 +130,7 @@ export class TokenMetadataEnricher implements Enricher {
           redirects: response.redirects
         });
       }
-      const contentLength = Number(response.response.headers.get("content-length") ?? 0);
-      if (contentLength > this.maxBytes) {
-        return metadataFetchFailure(launch, {
-          reason: "metadata_too_large",
-          resolvedUrl,
-          finalUrl: response.finalUrl,
-          redirects: response.redirects
-        });
-      }
-
-      const body = await response.response.text();
-      if (body.length > this.maxBytes) {
-        return metadataFetchFailure(launch, {
-          reason: "metadata_too_large",
-          resolvedUrl,
-          finalUrl: response.finalUrl,
-          redirects: response.redirects
-        });
-      }
-
-      const metadata = parseMetadataJson(body);
+      const metadata = parseMetadataJson(response.response.body);
       if (!metadata) {
         return metadataFetchFailure(launch, {
           reason: "invalid_metadata_json",
@@ -164,7 +171,7 @@ export class TokenMetadataEnricher implements Enricher {
   private async fetchWithSafeRedirects(
     initialUrl: string,
     signal: AbortSignal
-  ): Promise<{ response: Response; finalUrl: string; redirects: string[] } | MetadataFetchBlocked> {
+  ): Promise<{ response: MetadataHttpResponse; finalUrl: string; redirects: string[] } | MetadataFetchBlocked> {
     let currentUrl = initialUrl;
     const redirects: string[] = [];
 
@@ -172,11 +179,8 @@ export class TokenMetadataEnricher implements Enricher {
       const safety = await validatePublicHttpUrl(currentUrl, this.resolveHostname);
       if (!safety.safe) return new MetadataFetchBlocked(safety.reason, currentUrl, redirects);
 
-      const response = await fetch(currentUrl, {
-        signal,
-        redirect: "manual",
-        headers: { accept: "application/json,text/plain;q=0.8,*/*;q=0.1" }
-      });
+      const response = await this.fetchMetadata(currentUrl, safety.address, signal, this.maxBytes);
+      if (response instanceof MetadataFetchBlocked) return new MetadataFetchBlocked(response.reason, response.blockedUrl, redirects);
 
       if (!isRedirectStatus(response.status)) return { response, finalUrl: currentUrl, redirects };
 
@@ -208,6 +212,193 @@ class MetadataFetchBlocked {
   ) {}
 }
 
+async function fetchMetadataWithFetch(
+  fetchFn: typeof fetch,
+  value: string,
+  signal: AbortSignal,
+  maxBytes: number
+): Promise<MetadataHttpResponse | MetadataFetchBlocked> {
+  const response = await fetchFn(value, {
+    signal,
+    redirect: "manual",
+    headers: { accept: "application/json,text/plain;q=0.8,*/*;q=0.1" }
+  });
+  const status = typeof response.status === "number" ? response.status : response.ok ? 200 : 0;
+  if (isRedirectStatus(status)) {
+    return {
+      ok: Boolean(response.ok),
+      status,
+      headers: response.headers,
+      body: ""
+    };
+  }
+
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (contentLength > maxBytes) return new MetadataFetchBlocked("metadata_too_large", value, []);
+  const body = await readFetchResponseBody(response, maxBytes, value);
+  if (body instanceof MetadataFetchBlocked) return body;
+  return {
+    ok: Boolean(response.ok),
+    status,
+    headers: response.headers,
+    body
+  };
+}
+
+function fetchPinnedMetadata(
+  value: string,
+  address: string,
+  signal: AbortSignal,
+  maxBytes: number
+): Promise<MetadataHttpResponse | MetadataFetchBlocked> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(value);
+    const headers = {
+      accept: "application/json,text/plain;q=0.8,*/*;q=0.1",
+      host: url.host
+    };
+    const requestOptions = {
+      hostname: address,
+      port: url.port ? Number(url.port) : undefined,
+      path: `${url.pathname}${url.search}`,
+      method: "GET",
+      headers
+    };
+    let settled = false;
+    let req: ReturnType<typeof httpRequest> | ReturnType<typeof httpsRequest> | undefined;
+    const finish = (result: MetadataHttpResponse | MetadataFetchBlocked): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abortRequest);
+      resolve(result);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abortRequest);
+      reject(error);
+    };
+    const abortRequest = (): void => {
+      req?.destroy(abortError());
+    };
+    const handleResponse = (res: IncomingMessage): void => {
+      const status = res.statusCode ?? 0;
+      const responseHeaders = headersFromIncoming(res.headers);
+      const ok = status >= 200 && status < 300;
+      if (isRedirectStatus(status)) {
+        res.resume();
+        finish({ ok, status, headers: responseHeaders, body: "" });
+        return;
+      }
+
+      const contentLength = Number(responseHeaders.get("content-length") ?? 0);
+      if (contentLength > maxBytes) {
+        res.resume();
+        finish(new MetadataFetchBlocked("metadata_too_large", value, []));
+        req?.destroy();
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      let bytesRead = 0;
+      res.on("data", (chunk: Buffer | string) => {
+        if (settled) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytesRead += buffer.byteLength;
+        if (bytesRead > maxBytes) {
+          finish(new MetadataFetchBlocked("metadata_too_large", value, []));
+          req?.destroy();
+          return;
+        }
+        chunks.push(buffer);
+      });
+      res.on("end", () => {
+        if (settled) return;
+        finish({
+          ok,
+          status,
+          headers: responseHeaders,
+          body: Buffer.concat(chunks, bytesRead).toString("utf8")
+        });
+      });
+      res.on("error", fail);
+    };
+
+    req =
+      url.protocol === "https:"
+        ? httpsRequest(
+            {
+              ...requestOptions,
+              servername: isIP(normalizeHostname(url.hostname)) ? undefined : normalizeHostname(url.hostname)
+            },
+            handleResponse
+          )
+        : httpRequest(requestOptions, handleResponse);
+    req.on("error", (error) => {
+      if (settled) return;
+      fail(signal.aborted ? abortError() : error);
+    });
+    signal.addEventListener("abort", abortRequest, { once: true });
+    if (signal.aborted) abortRequest();
+    else req.end();
+  });
+}
+
+async function readFetchResponseBody(response: Response, maxBytes: number, blockedUrl: string): Promise<string | MetadataFetchBlocked> {
+  if (response.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytesRead = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+        bytesRead += chunk.byteLength;
+        if (bytesRead > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          return new MetadataFetchBlocked("metadata_too_large", blockedUrl, []);
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return new TextDecoder().decode(concatUint8Arrays(chunks, bytesRead));
+  }
+
+  const text = await response.text();
+  if (Buffer.byteLength(text, "utf8") > maxBytes) return new MetadataFetchBlocked("metadata_too_large", blockedUrl, []);
+  return text;
+}
+
+function concatUint8Arrays(chunks: Uint8Array[], totalLength: number): Uint8Array {
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function headersFromIncoming(headers: IncomingHttpHeaders): MetadataHeaders {
+  return {
+    get(name: string): string | null {
+      const value = headers[name.toLowerCase()];
+      if (Array.isArray(value)) return value.join(", ");
+      return value ?? null;
+    }
+  };
+}
+
+function abortError(): Error {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
 function metadataFetchFailure(
   launch: TokenLaunch,
   details: {
@@ -237,7 +428,7 @@ function metadataFetchFailure(
 async function validatePublicHttpUrl(
   value: string,
   resolveHostname: (hostname: string) => Promise<string[]>
-): Promise<{ safe: true } | { safe: false; reason: string }> {
+): Promise<{ safe: true; address: string } | { safe: false; reason: string }> {
   let url: URL;
   try {
     url = new URL(value);
@@ -253,13 +444,13 @@ async function validatePublicHttpUrl(
   if (isBlockedHostname(hostname)) return { safe: false, reason: "blocked_hostname" };
 
   if (isIP(hostname)) {
-    return isPublicIp(hostname) ? { safe: true } : { safe: false, reason: "blocked_private_ip" };
+    return isPublicIp(hostname) ? { safe: true, address: hostname } : { safe: false, reason: "blocked_private_ip" };
   }
 
   const addresses = await resolveHostname(hostname);
   if (addresses.length === 0) return { safe: false, reason: "hostname_resolution_failed" };
   if (addresses.some((address) => !isPublicIp(address))) return { safe: false, reason: "blocked_private_ip" };
-  return { safe: true };
+  return { safe: true, address: addresses[0] };
 }
 
 async function defaultResolveHostname(hostname: string): Promise<string[]> {

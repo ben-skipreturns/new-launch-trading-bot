@@ -64,13 +64,7 @@ export async function getDashboardSummary(): Promise<DataState<DashboardSummary>
 }
 
 export async function getLaunchList(sort: "latest" | "meme" | "risk" | "ev" = "latest"): Promise<DataState<LaunchListItem[]>> {
-  return safeRead([], async () => {
-    const launches = await getLaunches(100);
-    if (sort === "meme") return launches.sort((a, b) => b.memeRelevanceScore - a.memeRelevanceScore);
-    if (sort === "risk") return launches.sort((a, b) => b.riskScore - a.riskScore);
-    if (sort === "ev") return launches.sort((a, b) => b.expectedValueScore - a.expectedValueScore);
-    return launches;
-  });
+  return safeRead([], () => getLaunches(100, sort));
 }
 
 export async function getDecisionReview(): Promise<DataState<DecisionReview>> {
@@ -214,7 +208,7 @@ async function safeRead<T>(fallback: T, read: () => Promise<T>): Promise<DataSta
   }
 }
 
-async function getLaunches(limit = 50): Promise<LaunchListItem[]> {
+async function getLaunches(limit = 50, sort: "latest" | "meme" | "risk" | "ev" = "latest"): Promise<LaunchListItem[]> {
   const rows = await query<LaunchRow>(
     `select
        s.mint,
@@ -231,11 +225,18 @@ async function getLaunches(limit = 50): Promise<LaunchListItem[]> {
        s.feature_snapshot
      from latest_score_snapshots s
      left join token_launches tl on tl.mint = s.mint
-     order by s.as_of desc
+     order by ${launchOrderBy(sort)}
      limit $1`,
     [limit]
   );
   return rows.map(launchFromRow);
+}
+
+function launchOrderBy(sort: "latest" | "meme" | "risk" | "ev"): string {
+  if (sort === "meme") return "coalesce((s.feature_snapshot->>'memeRelevanceScore')::double precision, 0) desc, s.as_of desc";
+  if (sort === "risk") return "s.risk_score::double precision desc, s.as_of desc";
+  if (sort === "ev") return "s.expected_value_score::double precision desc, s.as_of desc";
+  return "s.as_of desc";
 }
 
 async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined> {

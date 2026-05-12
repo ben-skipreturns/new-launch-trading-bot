@@ -26,7 +26,7 @@ export class LivePositionSupervisor {
     this.refreshOpenPositionEnrichment = options.refreshOpenPositionEnrichment ?? true;
   }
 
-  async captureDueAgeSnapshots(asOf = new Date()): Promise<{ launches: number; snapshots: number }> {
+  async captureDueAgeSnapshots(asOf = new Date(), signal?: AbortSignal): Promise<{ launches: number; snapshots: number }> {
     const launches = await this.store.listTokenLaunches({
       createdAfter: new Date(asOf.getTime() - this.maxAgeBackfillMs)
     });
@@ -34,42 +34,46 @@ export class LivePositionSupervisor {
     let eligibleLaunches = 0;
 
     for (const launch of launches) {
+      if (signal?.aborted) break;
       if (asOf.getTime() - launch.createdAt.getTime() > this.maxAgeBackfillMs) continue;
       eligibleLaunches += 1;
-      snapshots += await this.captureDueLaunchAgeSnapshots(launch, asOf);
+      snapshots += await this.captureDueLaunchAgeSnapshots(launch, asOf, signal);
     }
 
     return { launches: eligibleLaunches, snapshots };
   }
 
-  async captureDueLaunchAgeSnapshots(launch: TokenLaunch, asOf = new Date()): Promise<number> {
+  async captureDueLaunchAgeSnapshots(launch: TokenLaunch, asOf = new Date(), signal?: AbortSignal): Promise<number> {
     let snapshots = 0;
     for (const ageSeconds of this.ageMilestonesSeconds) {
+      if (signal?.aborted) break;
       const snapshotAt = new Date(launch.createdAt.getTime() + ageSeconds * 1000);
       if (snapshotAt > asOf) continue;
-      const score = await this.pipeline.captureSnapshot(launch.mint, snapshotAt, "age", String(ageSeconds));
+      const score = await this.pipeline.captureSnapshot(launch.mint, snapshotAt, "age", String(ageSeconds), { signal });
       if (score) snapshots += 1;
     }
     return snapshots;
   }
 
-  async captureOpenPositionSnapshots(asOf = new Date()): Promise<{ positions: number; snapshots: number }> {
+  async captureOpenPositionSnapshots(asOf = new Date(), signal?: AbortSignal): Promise<{ positions: number; snapshots: number }> {
     const positions = await this.store.listOpenPositions();
     let snapshots = 0;
     const bucket = Math.floor(asOf.getTime() / this.openPositionSnapshotIntervalMs);
     for (const position of positions) {
+      if (signal?.aborted) break;
       const snapshotAt = new Date(Math.max(asOf.getTime(), position.openedAt.getTime()));
       const score = await this.pipeline.captureSnapshot(position.mint, snapshotAt, "age", `open-position:${bucket}`, {
-        refreshEnrichment: this.refreshOpenPositionEnrichment
+        refreshEnrichment: this.refreshOpenPositionEnrichment,
+        signal
       });
       if (score) snapshots += 1;
     }
     return { positions: positions.length, snapshots };
   }
 
-  async captureDueSnapshots(asOf = new Date()): Promise<{ launches: number; positions: number; snapshots: number }> {
-    const age = await this.captureDueAgeSnapshots(asOf);
-    const open = await this.captureOpenPositionSnapshots(asOf);
+  async captureDueSnapshots(asOf = new Date(), signal?: AbortSignal): Promise<{ launches: number; positions: number; snapshots: number }> {
+    const age = await this.captureDueAgeSnapshots(asOf, signal);
+    const open = signal?.aborted ? { positions: 0, snapshots: 0 } : await this.captureOpenPositionSnapshots(asOf, signal);
     return {
       launches: age.launches,
       positions: open.positions,

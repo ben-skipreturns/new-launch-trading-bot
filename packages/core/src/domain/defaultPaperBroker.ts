@@ -47,6 +47,8 @@ export const defaultPaperBrokerConfig: PaperBrokerConfig = {
 };
 
 export class DefaultPaperBroker implements PaperBroker {
+  private mutationLock: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly store: Store,
     private readonly config: PaperBrokerConfig = defaultPaperBrokerConfig
@@ -54,6 +56,16 @@ export class DefaultPaperBroker implements PaperBroker {
 
   async onScore(score: ScoreSnapshot): Promise<PaperOrder | null> {
     if (score.decision !== "paper_buy") return null;
+    return this.withMutationLock(() => this.onScoreLocked(score));
+  }
+
+  async onPrice(score: ScoreSnapshot): Promise<PaperOrder[]> {
+    const priceSol = score.features.priceSol;
+    if (!priceSol || !score.features.enrichmentFresh) return [];
+    return this.withMutationLock(() => this.onPriceLocked(score, priceSol));
+  }
+
+  private async onScoreLocked(score: ScoreSnapshot): Promise<PaperOrder | null> {
     const existing = await this.store.getOpenPosition(score.mint);
     if (existing) return null;
 
@@ -100,9 +112,7 @@ export class DefaultPaperBroker implements PaperBroker {
     return order;
   }
 
-  async onPrice(score: ScoreSnapshot): Promise<PaperOrder[]> {
-    const priceSol = score.features.priceSol;
-    if (!priceSol || !score.features.enrichmentFresh) return [];
+  private async onPriceLocked(score: ScoreSnapshot, priceSol: number): Promise<PaperOrder[]> {
     const position = await this.store.getOpenPosition(score.mint);
     if (!position) return [];
 
@@ -138,6 +148,20 @@ export class DefaultPaperBroker implements PaperBroker {
 
     await this.store.upsertPaperPosition(position);
     return orders;
+  }
+
+  private async withMutationLock<T>(run: () => Promise<T>): Promise<T> {
+    const previous = this.mutationLock;
+    let release!: () => void;
+    this.mutationLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
   }
 
   private async exit(

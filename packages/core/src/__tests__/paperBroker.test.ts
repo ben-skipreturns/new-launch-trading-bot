@@ -75,6 +75,27 @@ describe("DefaultPaperBroker", () => {
     expect(second?.reason).toBe("MAX_TOPIC_EXPOSURE");
   });
 
+  it("serializes concurrent buy signals before enforcing portfolio caps", async () => {
+    const store = new MemoryStore();
+    const broker = new DefaultPaperBroker(store, {
+      ...defaultTestConfig(),
+      maxConcurrentPositions: 1,
+      maxOpenPositionsPerMemeTopic: 10,
+      maxOpenPositionsPerCreator: 10,
+      maxDailyBuysPerSymbolFamily: 10
+    });
+
+    const [first, second] = await Promise.all([
+      broker.onScore(score("paper_buy", 0.000001, "2026-05-08T12:00:00.000Z", { mint: "MintRaceA", memeMatchedTopicId: "topic:a" })),
+      broker.onScore(score("paper_buy", 0.000001, "2026-05-08T12:00:00.000Z", { mint: "MintRaceB", memeMatchedTopicId: "topic:b" }))
+    ]);
+    const orders = [first, second].filter(Boolean);
+
+    expect(orders.filter((order) => order?.status === "filled")).toHaveLength(1);
+    expect(orders.filter((order) => order?.status === "rejected")[0]?.reason).toBe("MAX_CONCURRENT_POSITIONS");
+    expect(await store.listOpenPositions()).toHaveLength(1);
+  });
+
   it("caps open positions by creator exposure", async () => {
     const store = new MemoryStore();
     await store.upsertTokenLaunch(launch({ mint: "MintCreatorA", creator: "CreatorSame", symbol: "A" }));
