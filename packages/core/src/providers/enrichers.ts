@@ -378,8 +378,9 @@ export class BirdeyeEnricher implements Enricher {
     if (!response.ok) return null;
     const raw = (await response.json()) as BirdeyeHolderResponse;
     const holders = raw.data?.items ?? [];
-    const total = holders.reduce((sum, holder) => sum + Number(holder.amount ?? 0), 0);
-    const topHolderShare = total > 0 ? Number(holders[0]?.amount ?? 0) / total : undefined;
+    const returnedHolderTotal = holders.reduce((sum, holder) => sum + Number(holder.amount ?? 0), 0);
+    const topHolderAmount = Number(holders[0]?.amount ?? 0);
+    const topHolderShare = launch.supply && launch.supply > 0 ? Math.min(1, Math.max(0, topHolderAmount / launch.supply)) : undefined;
     return {
       mint: launch.mint,
       observedAt: new Date(),
@@ -391,7 +392,8 @@ export class BirdeyeEnricher implements Enricher {
       raw: {
         ...raw,
         derived: {
-          topHolderShareBasis: "share of returned holder rows",
+          returnedHolderTopShare: returnedHolderTotal > 0 ? topHolderAmount / returnedHolderTotal : undefined,
+          topHolderShareBasis: topHolderShare === undefined ? "not_available_without_launch_supply" : "share_of_launch_supply",
           devHoldingShare: "not_inferred_from_top_holder"
         }
       } as JsonValue

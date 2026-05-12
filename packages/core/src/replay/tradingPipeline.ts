@@ -8,6 +8,16 @@ export interface TradingPipelineOptions {
   activeTrendWindowMs?: number;
 }
 
+export interface ProcessLaunchEventOptions {
+  rawEventAlreadyStored?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface CaptureSnapshotOptions {
+  refreshEnrichment?: boolean;
+  signal?: AbortSignal;
+}
+
 export class TradingPipeline {
   private readonly captured = new Set<string>();
   private readonly bondingCurveMilestones: number[];
@@ -26,12 +36,12 @@ export class TradingPipeline {
     this.activeTrendWindowMs = options.activeTrendWindowMs ?? 48 * 60 * 60 * 1000;
   }
 
-  async processEvent(event: LaunchEvent): Promise<ScoreSnapshot | null> {
-    await this.store.upsertRawEvent(event);
+  async processEvent(event: LaunchEvent, options: ProcessLaunchEventOptions = {}): Promise<ScoreSnapshot | null> {
+    if (!options.rawEventAlreadyStored) await this.store.upsertRawEvent(event);
 
     if (event.tokenLaunch) {
       await this.store.upsertTokenLaunch(event.tokenLaunch);
-      const enrichment = await this.enricher?.enrich(event.tokenLaunch);
+      const enrichment = await this.enricher?.enrich(event.tokenLaunch, options.signal);
       if (enrichment) await this.store.upsertTokenEnrichment(enrichment);
       if (this.memeMatcher) {
         const topics = await this.store.listTrendTopics(new Date(event.timestamp.getTime() - this.activeTrendWindowMs), 500);
@@ -56,7 +66,7 @@ export class TradingPipeline {
     const mint = event.mint ?? event.tokenLaunch?.mint ?? event.tradeEvent?.mint;
     if (!mint) return null;
 
-    const score = await this.captureSnapshot(mint, event.timestamp, "event", event.signature);
+    const score = await this.captureSnapshot(mint, event.timestamp, "event", event.signature, { signal: options.signal });
     if (event.tradeEvent?.vSolInBondingCurve) {
       await this.captureBondingCurveMilestones(mint, event.timestamp, event.tradeEvent.vSolInBondingCurve);
     }
@@ -67,7 +77,8 @@ export class TradingPipeline {
     mint: string,
     asOf: Date,
     triggerType: "event" | "age" | "bonding_curve",
-    triggerValue: string
+    triggerValue: string,
+    options: CaptureSnapshotOptions = {}
   ): Promise<ScoreSnapshot | null> {
     const key =
       triggerType === "bonding_curve"
@@ -79,7 +90,11 @@ export class TradingPipeline {
 
     const launch = await this.store.getTokenLaunch(mint);
     if (!launch) return null;
-    const enrichment = await this.store.getLatestEnrichment(mint, asOf);
+    const storedEnrichment = await this.store.getLatestEnrichment(mint, asOf);
+    const refreshedEnrichment =
+      options.refreshEnrichment && this.enricher ? await this.enricher.enrich(launch, options.signal) : null;
+    if (refreshedEnrichment) await this.store.upsertTokenEnrichment(refreshedEnrichment);
+    const enrichment = refreshedEnrichment ?? storedEnrichment;
     const features = await this.featureExtractor.extract({
       launch,
       asOf,

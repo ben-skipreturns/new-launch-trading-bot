@@ -18,6 +18,12 @@ import type {
   TrendTopic
 } from "../domain/types.js";
 
+export interface ListTokenLaunchesOptions {
+  createdAfter?: Date;
+  limit?: number;
+  order?: "asc" | "desc";
+}
+
 export interface Store {
   upsertRawEvent(event: LaunchEvent): Promise<void>;
   upsertTokenLaunch(launch: TokenLaunch): Promise<void>;
@@ -36,7 +42,7 @@ export interface Store {
   insertRetentionRun(run: RetentionRun): Promise<void>;
 
   getTokenLaunch(mint: string): Promise<TokenLaunch | undefined>;
-  listTokenLaunches(): Promise<TokenLaunch[]>;
+  listTokenLaunches(options?: ListTokenLaunchesOptions): Promise<TokenLaunch[]>;
   listTradeEvents(mint: string, upTo?: Date): Promise<TradeEvent[]>;
   getLatestEnrichment(mint: string, upTo?: Date): Promise<TokenEnrichment | undefined>;
   getOpenPosition(mint: string): Promise<PaperPosition | undefined>;

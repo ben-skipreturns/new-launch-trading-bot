@@ -3,7 +3,14 @@ import type { LaunchFeed } from "../domain/interfaces.js";
 import type { JsonValue, LaunchEvent } from "../domain/types.js";
 import { normalizePumpApiEvent } from "../normalizers/pumpApi.js";
 
-export type PumpApiStreamStatusType = "connected" | "disconnected" | "reconnecting" | "stale" | "error" | "parser_reject";
+export type PumpApiStreamStatusType =
+  | "connected"
+  | "disconnected"
+  | "reconnecting"
+  | "stale"
+  | "error"
+  | "parser_reject"
+  | "queue_overflow";
 
 export interface PumpApiStreamStatusEvent {
   type: PumpApiStreamStatusType;
@@ -24,6 +31,7 @@ export interface PumpApiLaunchFeedOptions {
   initialReconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   staleTimeoutMs?: number;
+  maxQueueSize?: number;
   onStatus?: (event: PumpApiStreamStatusEvent) => void;
 }
 
@@ -52,6 +60,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
   private readonly initialReconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
   private readonly staleTimeoutMs: number;
+  private readonly maxQueueSize: number;
   private readonly onStatus?: (event: PumpApiStreamStatusEvent) => void;
 
   constructor(urlOrOptions: string | PumpApiLaunchFeedOptions = process.env.PUMPAPI_STREAM_URL ?? defaultUrl) {
@@ -62,6 +71,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
     this.initialReconnectDelayMs = options.initialReconnectDelayMs ?? 1_000;
     this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? 30_000;
     this.staleTimeoutMs = options.staleTimeoutMs ?? 30_000;
+    this.maxQueueSize = options.maxQueueSize ?? 1_000;
     this.onStatus = options.onStatus;
   }
 
@@ -99,6 +109,18 @@ export class PumpApiLaunchFeed implements LaunchFeed {
           const payloadText = data.toString();
           const parsed = parsePumpApiMessage(payloadText);
           if (parsed.event) {
+            if (queue.length >= this.maxQueueSize) {
+              latestSocketError = new Error(`PumpApi event queue exceeded ${this.maxQueueSize} pending events.`);
+              this.emitStatus({
+                type: "queue_overflow",
+                at: new Date(),
+                attempt,
+                errorText: latestSocketError.message,
+                lastEventAt
+              });
+              socket.close();
+              return;
+            }
             lastEventAt = parsed.event.timestamp;
             queue.push({ event: parsed.event });
           } else if (parsed.reject) {

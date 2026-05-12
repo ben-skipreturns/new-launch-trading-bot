@@ -223,7 +223,7 @@ async function safeRead<T>(fallback: T, read: () => Promise<T>): Promise<DataSta
 async function getLaunches(limit = 50): Promise<LaunchListItem[]> {
   const rows = await query<LaunchRow>(
     `with latest_scores as (
-       select
+       select distinct on (s.mint)
          s.mint,
          tl.name,
          tl.symbol,
@@ -235,14 +235,13 @@ async function getLaunches(limit = 50): Promise<LaunchListItem[]> {
          s.expected_value_score,
          s.decision,
          s.reasons,
-         s.feature_snapshot,
-         row_number() over (partition by s.mint order by s.as_of desc) as score_rank
+         s.feature_snapshot
        from score_snapshots s
        left join token_launches tl on tl.mint = s.mint
+       order by s.mint, s.as_of desc
      )
      select *
      from latest_scores
-     where score_rank = 1
      order by as_of desc
      limit $1`,
     [limit]
@@ -294,9 +293,12 @@ async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined
 async function getRawLaunches(page: number, pageSize: number, filters: RawLaunchFilters): Promise<RawLaunchPage> {
   const offset = (page - 1) * pageSize;
   const where = buildRawLaunchWhere(filters);
+  const statusCte = rawLaunchStatusCte();
+  const statusJoins = rawLaunchStatusJoins();
   const [rows, statsRows, sourceRows, streamHealth] = await Promise.all([
     query<RawLaunchRow>(
-      `select
+      `${statusCte}
+       select
          tl.mint,
          tl.source,
          tl.signature,
@@ -311,25 +313,25 @@ async function getRawLaunches(page: number, pageSize: number, filters: RawLaunch
          tl.initial_buy_sol,
          tl.v_sol_in_bonding_curve,
          tl.market_cap_sol,
-         exists(select 1 from token_meme_matches m where m.mint = tl.mint) as has_meme_match,
-         exists(select 1 from score_snapshots s where s.mint = tl.mint) as has_score
+         (mm.mint is not null) as has_meme_match,
+         (ss.mint is not null) as has_score
        from token_launches tl
+       ${statusJoins}
        ${where.sql}
        order by tl.created_at desc
        limit $${where.params.length + 1} offset $${where.params.length + 2}`,
       [...where.params, pageSize, offset]
     ),
     query<RawLaunchStatsRow>(
-      `select
+      `${statusCte}
+       select
          count(*)::text as total_count,
-         count(*) filter (
-           where not exists(select 1 from token_meme_matches m where m.mint = tl.mint)
-             and not exists(select 1 from score_snapshots s where s.mint = tl.mint)
-         )::text as raw_only_count,
-         count(*) filter (where exists(select 1 from token_meme_matches m where m.mint = tl.mint))::text as matched_count,
-         count(*) filter (where exists(select 1 from score_snapshots s where s.mint = tl.mint))::text as scored_count,
+         count(*) filter (where mm.mint is null and ss.mint is null)::text as raw_only_count,
+         count(*) filter (where mm.mint is not null)::text as matched_count,
+         count(*) filter (where ss.mint is not null)::text as scored_count,
          max(created_at) as latest_created_at
        from token_launches tl
+       ${statusJoins}
        ${where.sql}`,
       where.params
     ),
@@ -372,15 +374,29 @@ function buildRawLaunchWhere(filters: RawLaunchFilters): { sql: string; params: 
     clauses.push(`tl.created_at >= $${params.length}`);
   }
   if (filters.status === "raw") {
-    clauses.push("not exists(select 1 from token_meme_matches m where m.mint = tl.mint)");
-    clauses.push("not exists(select 1 from score_snapshots s where s.mint = tl.mint)");
+    clauses.push("mm.mint is null");
+    clauses.push("ss.mint is null");
   }
-  if (filters.status === "matched") clauses.push("exists(select 1 from token_meme_matches m where m.mint = tl.mint)");
-  if (filters.status === "scored") clauses.push("exists(select 1 from score_snapshots s where s.mint = tl.mint)");
+  if (filters.status === "matched") clauses.push("mm.mint is not null");
+  if (filters.status === "scored") clauses.push("ss.mint is not null");
   return {
     sql: clauses.length > 0 ? `where ${clauses.join(" and ")}` : "",
     params
   };
+}
+
+function rawLaunchStatusCte(): string {
+  return `with matched_mints as (
+        select distinct mint from token_meme_matches
+      ),
+      scored_mints as (
+        select distinct mint from score_snapshots
+      )`;
+}
+
+function rawLaunchStatusJoins(): string {
+  return `left join matched_mints mm on mm.mint = tl.mint
+       left join scored_mints ss on ss.mint = tl.mint`;
 }
 
 function isRawLaunchStatusFilter(value: unknown): value is RawLaunchStatusFilter {

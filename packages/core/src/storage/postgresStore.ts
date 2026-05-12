@@ -21,6 +21,7 @@ import type {
   TrendTopic
 } from "../domain/types.js";
 import type { Store } from "./store.js";
+import type { ListTokenLaunchesOptions } from "./store.js";
 
 interface RawEventsTable {
   id: Generated<number>;
@@ -689,8 +690,12 @@ export class PostgresStore implements Store {
     return row ? launchFromRow(row) : undefined;
   }
 
-  async listTokenLaunches(): Promise<TokenLaunch[]> {
-    const rows = await this.db.selectFrom("token_launches").selectAll().orderBy("created_at").execute();
+  async listTokenLaunches(options: ListTokenLaunchesOptions = {}): Promise<TokenLaunch[]> {
+    let query = this.db.selectFrom("token_launches").selectAll();
+    if (options.createdAfter) query = query.where("created_at", ">=", options.createdAfter);
+    query = query.orderBy("created_at", options.order ?? "asc");
+    if (typeof options.limit === "number") query = query.limit(options.limit);
+    const rows = await query.execute();
     return rows.map(launchFromRow);
   }
 

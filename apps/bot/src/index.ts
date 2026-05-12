@@ -74,12 +74,16 @@ program
   .requiredOption("--fixture <path>", "JSONL fixture path")
   .option("--report <path>", "Report path", "reports/replay.md")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
-  .action(async (options: { fixture: string; report: string; databaseUrl?: string }) => {
+  .option("--trend-source <source>", "fixture or live trend topics", "fixture")
+  .option("--enrichment-source <source>", "fixture or live token enrichment", "fixture")
+  .action(async (options: ReplayOptions) => {
     const store = createStore(options.databaseUrl);
     try {
-      if (options.fixture.includes("fixture")) await refreshTrends(store, fixtureTrendSources());
+      const trendSource = parseReplaySourceOption(options.trendSource, "--trend-source");
+      const enrichmentSource = parseReplaySourceOption(options.enrichmentSource, "--enrichment-source");
+      if (trendSource === "fixture") await refreshTrends(store, fixtureTrendSources());
       else await refreshLiveTrendsOrFail(store);
-      const result = await runReplay(options.fixture, store, options.fixture.includes("fixture") ? fixtureEnricher() : liveEnricher());
+      const result = await runReplay(options.fixture, store, enrichmentSource === "fixture" ? fixtureEnricher() : liveEnricher());
       const report = await generateDailyReport(store);
       await writeText(options.report, report);
       console.log(`Processed ${result.events} events and ${result.snapshots} snapshots.`);
@@ -98,9 +102,20 @@ program
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--trend-refresh-minutes <minutes>", "Refresh live trend topics while streaming", process.env.OPENAI_TREND_REFRESH_MINUTES ?? "15")
   .option("--position-check-seconds <seconds>", "Capture age/open-position snapshots while streaming", "30")
+  .option("--stale-timeout-seconds <seconds>", "Reconnect PumpApi if no messages arrive for this long", "30")
+  .option("--max-reconnects <count>", "Maximum PumpApi reconnect attempts during this run", "20")
+  .option("--max-feed-queue <count>", "Maximum provider events buffered before reconnecting", process.env.PUMPAPI_MAX_FEED_QUEUE ?? "1000")
+  .option(
+    "--processing-concurrency <count>",
+    "Concurrent live event processors, ordered per mint",
+    process.env.LIVE_PROCESSING_CONCURRENCY ?? "4"
+  )
+  .option("--max-processing-queue <count>", "Maximum live events waiting for processors", process.env.LIVE_MAX_PROCESSING_QUEUE ?? "500")
   .option("--allow-empty-trends", "Continue live ingestion even when no active trend topics are available", false)
   .action(async (options: IngestOptions) => {
+    if (options.source === "pumpapi" && !options.databaseUrl) throw new Error("DATABASE_URL is required for live pumpapi ingestion.");
     const store = createStore(options.databaseUrl);
+    const health = options.source === "pumpapi" ? createStreamHealthRun(options.source) : undefined;
     try {
       if (options.source === "fixture") {
         await refreshTrends(store, fixtureTrendSources());
@@ -109,17 +124,25 @@ program
         return;
       }
 
+      if (health) await store.upsertStreamHealthRun(health);
       await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
-      const feed = new PumpApiLaunchFeed();
+      const feed = createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health));
       const pipeline = createPipeline(store, liveEnricher());
       const durationMs = Number(options.durationSeconds) * 1000;
       const result = await runStreaming(feed, pipeline, durationMs, {
         store,
+        health,
         trendRefreshMs: parsePositiveNumberOption(options.trendRefreshMinutes, "--trend-refresh-minutes") * 60 * 1000,
         positionCheckMs: parsePositiveNumberOption(options.positionCheckSeconds, "--position-check-seconds") * 1000,
+        processingConcurrency: parsePositiveIntegerOption(options.processingConcurrency, "--processing-concurrency"),
+        maxProcessingQueue: parsePositiveIntegerOption(options.maxProcessingQueue, "--max-processing-queue"),
         allowEmptyTrends: options.allowEmptyTrends
       });
+      if (health) await finishStreamHealthRun(store, health, "completed");
       console.log(`Processed ${result.events} live events.`);
+    } catch (error) {
+      if (health) await finishStreamHealthRun(store, health, "error", error);
+      throw error;
     } finally {
       await closeStore(store);
     }
@@ -134,6 +157,7 @@ program
   .option("--max-launches <count>", "Stop after this many create events", "25")
   .option("--stale-timeout-seconds <seconds>", "Reconnect PumpApi if no messages arrive for this long", "30")
   .option("--max-reconnects <count>", "Maximum PumpApi reconnect attempts during this run", "20")
+  .option("--max-feed-queue <count>", "Maximum provider events buffered before reconnecting", process.env.PUMPAPI_MAX_FEED_QUEUE ?? "1000")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--persist", "Persist only raw create events and token_launches", false)
   .action(async (options: StreamTestOptions) => {
@@ -257,10 +281,7 @@ program
 
       const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
       const since = new Date(observedAt.getTime() - sinceHours * 60 * 60 * 1000);
-      const launches = (await store.listTokenLaunches())
-        .filter((launch) => launch.createdAt >= since)
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-        .slice(0, limit);
+      const launches = await store.listTokenLaunches({ createdAfter: since, limit, order: "desc" });
 
       const matcher = createTokenMemeMatcher(minScore, options.fixtureTopics);
       let skippedExisting = 0;
@@ -313,6 +334,7 @@ program
   .option("--max-launches <count>", "Stop after this many create events", "25")
   .option("--stale-timeout-seconds <seconds>", "Reconnect PumpApi if no messages arrive for this long", "30")
   .option("--max-reconnects <count>", "Maximum PumpApi reconnect attempts during this run", "20")
+  .option("--max-feed-queue <count>", "Maximum provider events buffered before reconnecting", process.env.PUMPAPI_MAX_FEED_QUEUE ?? "1000")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
   .option("--refresh-trends", "Refresh trend topics at startup before matching", false)
@@ -488,7 +510,20 @@ interface IngestOptions {
   databaseUrl?: string;
   trendRefreshMinutes: string;
   positionCheckSeconds: string;
+  staleTimeoutSeconds: string;
+  maxReconnects: string;
+  maxFeedQueue: string;
+  processingConcurrency: string;
+  maxProcessingQueue: string;
   allowEmptyTrends: boolean;
+}
+
+interface ReplayOptions {
+  fixture: string;
+  report: string;
+  databaseUrl?: string;
+  trendSource: string;
+  enrichmentSource: string;
 }
 
 interface MatchLaunchesOptions {
@@ -510,6 +545,7 @@ interface MatchStreamOptions {
   maxLaunches: string;
   staleTimeoutSeconds: string;
   maxReconnects: string;
+  maxFeedQueue: string;
   databaseUrl?: string;
   fixtureTopics: boolean;
   refreshTrends: boolean;
@@ -527,6 +563,7 @@ interface StreamTestOptions {
   maxLaunches: string;
   staleTimeoutSeconds: string;
   maxReconnects: string;
+  maxFeedQueue: string;
   databaseUrl?: string;
   persist: boolean;
 }
@@ -534,17 +571,19 @@ interface StreamTestOptions {
 interface PumpApiFeedCliOptions {
   staleTimeoutMs?: number;
   maxReconnects?: number;
+  maxQueueSize?: number;
   onStatus?: (event: PumpApiStreamStatusEvent) => void;
 }
 
 function streamFeedOptions(
-  options: Pick<StreamTestOptions | MatchStreamOptions, "staleTimeoutSeconds" | "maxReconnects">,
+  options: Pick<StreamTestOptions | MatchStreamOptions | IngestOptions, "staleTimeoutSeconds" | "maxReconnects" | "maxFeedQueue">,
   store?: Store,
   health?: StreamHealthRun
 ): PumpApiFeedCliOptions {
   return {
     staleTimeoutMs: parsePositiveNumberOption(options.staleTimeoutSeconds, "--stale-timeout-seconds") * 1000,
     maxReconnects: parsePositiveIntegerOption(options.maxReconnects, "--max-reconnects"),
+    maxQueueSize: parsePositiveIntegerOption(options.maxFeedQueue, "--max-feed-queue"),
     onStatus: health ? createStreamStatusHandler(store, health) : undefined
   };
 }
@@ -587,6 +626,10 @@ function createStreamStatusHandler(store: Store | undefined, health: StreamHealt
       health.status = "stale";
     }
     if (event.type === "error") {
+      health.errorText = event.errorText;
+      health.status = "error";
+    }
+    if (event.type === "queue_overflow") {
       health.errorText = event.errorText;
       health.status = "error";
     }
@@ -849,6 +892,7 @@ function createLaunchFeed(source: string, fixturePath: string, options?: PumpApi
     return new PumpApiLaunchFeed({
       staleTimeoutMs: options?.staleTimeoutMs,
       maxReconnects: options?.maxReconnects,
+      maxQueueSize: options?.maxQueueSize,
       onStatus: options?.onStatus
     });
   }
@@ -1028,6 +1072,11 @@ function parsePositiveIntegerOption(value: string, name: string): number {
   return parsed;
 }
 
+function parseReplaySourceOption(value: string, name: string): "fixture" | "live" {
+  if (value === "fixture" || value === "live") return value;
+  throw new Error(`${name} must be "fixture" or "live".`);
+}
+
 function formatRate(value: number | undefined): string {
   if (value === undefined || Number.isNaN(value)) return "0.000";
   return value.toFixed(3);
@@ -1056,6 +1105,15 @@ async function runStreaming(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), durationMs);
   const stopBackgroundWork: Array<() => void> = [];
+  const processor = new EventProcessingPool({
+    concurrency: options.processingConcurrency ?? 1,
+    maxQueuedEvents: options.maxProcessingQueue ?? 100,
+    onFailure: (error) => {
+      console.error(`event processing failed: ${error instanceof Error ? error.message : String(error)}`);
+      controller.abort();
+    },
+    onMetrics: (metrics) => updateStreamProcessingHealth(options.store, options.health, metrics)
+  });
   if (options.store) {
     const supervisor = new LivePositionSupervisor(options.store, pipeline, {
       openPositionSnapshotIntervalMs: options.positionCheckMs
@@ -1076,11 +1134,24 @@ async function runStreaming(
     );
   }
   let events = 0;
+  const seenLaunches = new Set<string>();
   try {
     for await (const event of feed.stream(controller.signal)) {
-      await pipeline.processEvent(event);
+      const duplicateLaunch = event.tokenLaunch ? await isDuplicateLaunch(options.store, seenLaunches, event.tokenLaunch) : false;
+      await recordStreamHealthEvent(options.store, options.health, event, duplicateLaunch);
+      if (options.store) {
+        await options.store.upsertRawEvent(event);
+        if (event.tokenLaunch) await options.store.upsertTokenLaunch(event.tokenLaunch);
+      }
+      await processor.add(event.mint ?? event.tokenLaunch?.mint ?? event.tradeEvent?.mint ?? event.signature, () =>
+        pipeline.processEvent(event, {
+          rawEventAlreadyStored: Boolean(options.store),
+          signal: controller.signal
+        })
+      );
       events += 1;
     }
+    await processor.drain();
   } finally {
     clearTimeout(timeout);
     stopBackgroundWork.forEach((stop) => stop());
@@ -1090,9 +1161,139 @@ async function runStreaming(
 
 interface LiveStreamingOptions {
   store?: Store;
+  health?: StreamHealthRun;
   trendRefreshMs?: number;
   positionCheckMs?: number;
+  processingConcurrency?: number;
+  maxProcessingQueue?: number;
   allowEmptyTrends?: boolean;
+}
+
+interface EventProcessingMetrics {
+  active: number;
+  queued: number;
+  concurrency: number;
+  maxQueuedEvents: number;
+  oldestQueuedMs: number;
+}
+
+interface QueuedEventTask {
+  key: string;
+  enqueuedAt: number;
+  run: () => Promise<unknown>;
+}
+
+class EventProcessingPool {
+  private readonly concurrency: number;
+  private readonly maxQueuedEvents: number;
+  private readonly onFailure?: (error: unknown) => void;
+  private readonly onMetrics?: (metrics: EventProcessingMetrics) => void;
+  private readonly pending: QueuedEventTask[] = [];
+  private readonly activeKeys = new Set<string>();
+  private readonly capacityWaiters: Array<() => void> = [];
+  private readonly idleWaiters: Array<() => void> = [];
+  private active = 0;
+  private failure: unknown;
+
+  constructor(options: {
+    concurrency: number;
+    maxQueuedEvents: number;
+    onFailure?: (error: unknown) => void;
+    onMetrics?: (metrics: EventProcessingMetrics) => void;
+  }) {
+    this.concurrency = Math.max(1, options.concurrency);
+    this.maxQueuedEvents = Math.max(1, options.maxQueuedEvents);
+    this.onFailure = options.onFailure;
+    this.onMetrics = options.onMetrics;
+  }
+
+  async add(key: string, run: () => Promise<unknown>): Promise<void> {
+    this.throwIfFailed();
+    while (this.pending.length >= this.maxQueuedEvents) {
+      await new Promise<void>((resolve) => this.capacityWaiters.push(resolve));
+      this.throwIfFailed();
+    }
+    this.pending.push({ key, run, enqueuedAt: Date.now() });
+    this.emitMetrics();
+    this.pump();
+  }
+
+  async drain(): Promise<void> {
+    while (this.pending.length > 0 || this.active > 0) {
+      this.throwIfFailed();
+      await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
+      this.throwIfFailed();
+    }
+    this.throwIfFailed();
+  }
+
+  private pump(): void {
+    while (this.active < this.concurrency) {
+      const index = this.pending.findIndex((task) => !this.activeKeys.has(task.key));
+      if (index < 0) break;
+      const [task] = this.pending.splice(index, 1);
+      this.active += 1;
+      this.activeKeys.add(task.key);
+      this.emitMetrics();
+      void Promise.resolve()
+        .then(task.run)
+        .catch((error) => {
+          if (!this.failure) {
+            this.failure = error;
+            this.onFailure?.(error);
+          }
+        })
+        .finally(() => {
+          this.active -= 1;
+          this.activeKeys.delete(task.key);
+          if (this.failure) this.pending.splice(0);
+          this.resolveCapacityWaiters();
+          this.emitMetrics();
+          if (!this.failure) this.pump();
+          this.resolveIdleWaitersIfIdle();
+        });
+    }
+  }
+
+  private throwIfFailed(): void {
+    if (this.failure) throw this.failure;
+  }
+
+  private resolveCapacityWaiters(): void {
+    this.capacityWaiters.splice(0).forEach((resolve) => resolve());
+  }
+
+  private resolveIdleWaitersIfIdle(): void {
+    if (this.pending.length > 0 || this.active > 0) return;
+    this.idleWaiters.splice(0).forEach((resolve) => resolve());
+  }
+
+  private emitMetrics(): void {
+    const oldestQueuedMs = this.pending.length > 0 ? Date.now() - Math.min(...this.pending.map((task) => task.enqueuedAt)) : 0;
+    this.onMetrics?.({
+      active: this.active,
+      queued: this.pending.length,
+      concurrency: this.concurrency,
+      maxQueuedEvents: this.maxQueuedEvents,
+      oldestQueuedMs
+    });
+  }
+}
+
+function updateStreamProcessingHealth(store: Store | undefined, health: StreamHealthRun | undefined, metrics: EventProcessingMetrics): void {
+  if (!health) return;
+  const raw = isJsonRecord(health.raw) ? health.raw : {};
+  health.raw = {
+    ...raw,
+    processing: {
+      active: metrics.active,
+      queued: metrics.queued,
+      concurrency: metrics.concurrency,
+      maxQueuedEvents: metrics.maxQueuedEvents,
+      oldestQueuedMs: metrics.oldestQueuedMs
+    }
+  };
+  if (store) void store.upsertStreamHealthRun(health).catch(() => undefined);
 }
 
 function startBackgroundLoop(
@@ -1140,7 +1341,11 @@ async function closeStore(store: Store): Promise<void> {
 }
 
 async function applyMigrations(store: PostgresStore): Promise<void> {
-  const files = ["migrations/001_initial_schema.sql", "migrations/002_launch_readiness_indexes.sql"];
+  const files = [
+    "migrations/001_initial_schema.sql",
+    "migrations/002_launch_readiness_indexes.sql",
+    "migrations/003_live_launch_hardening.sql"
+  ];
   for (const file of files) {
     const sql = await readFile(file, "utf8");
     await store.runMigration(sql);

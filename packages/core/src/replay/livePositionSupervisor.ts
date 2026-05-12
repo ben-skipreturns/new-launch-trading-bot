@@ -6,12 +6,14 @@ export interface LivePositionSupervisorOptions {
   ageMilestonesSeconds?: number[];
   maxAgeBackfillMs?: number;
   openPositionSnapshotIntervalMs?: number;
+  refreshOpenPositionEnrichment?: boolean;
 }
 
 export class LivePositionSupervisor {
   private readonly ageMilestonesSeconds: number[];
   private readonly maxAgeBackfillMs: number;
   private readonly openPositionSnapshotIntervalMs: number;
+  private readonly refreshOpenPositionEnrichment: boolean;
 
   constructor(
     private readonly store: Store,
@@ -21,10 +23,13 @@ export class LivePositionSupervisor {
     this.ageMilestonesSeconds = options.ageMilestonesSeconds ?? [15, 30, 60, 180, 300];
     this.maxAgeBackfillMs = options.maxAgeBackfillMs ?? 30 * 60 * 1000;
     this.openPositionSnapshotIntervalMs = options.openPositionSnapshotIntervalMs ?? 30_000;
+    this.refreshOpenPositionEnrichment = options.refreshOpenPositionEnrichment ?? true;
   }
 
   async captureDueAgeSnapshots(asOf = new Date()): Promise<{ launches: number; snapshots: number }> {
-    const launches = await this.store.listTokenLaunches();
+    const launches = await this.store.listTokenLaunches({
+      createdAfter: new Date(asOf.getTime() - this.maxAgeBackfillMs)
+    });
     let snapshots = 0;
     let eligibleLaunches = 0;
 
@@ -53,8 +58,10 @@ export class LivePositionSupervisor {
     let snapshots = 0;
     const bucket = Math.floor(asOf.getTime() / this.openPositionSnapshotIntervalMs);
     for (const position of positions) {
-      const snapshotAt = new Date(Math.max(bucket * this.openPositionSnapshotIntervalMs, position.openedAt.getTime()));
-      const score = await this.pipeline.captureSnapshot(position.mint, snapshotAt, "age", `open-position:${bucket}`);
+      const snapshotAt = new Date(Math.max(asOf.getTime(), position.openedAt.getTime()));
+      const score = await this.pipeline.captureSnapshot(position.mint, snapshotAt, "age", `open-position:${bucket}`, {
+        refreshEnrichment: this.refreshOpenPositionEnrichment
+      });
       if (score) snapshots += 1;
     }
     return { positions: positions.length, snapshots };

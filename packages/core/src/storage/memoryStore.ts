@@ -18,6 +18,7 @@ import type {
   TrendTopic
 } from "../domain/types.js";
 import type { Store } from "./store.js";
+import type { ListTokenLaunchesOptions } from "./store.js";
 
 export class MemoryStore implements Store {
   readonly rawEvents = new Map<string, LaunchEvent>();
@@ -127,8 +128,12 @@ export class MemoryStore implements Store {
     return this.launches.get(mint);
   }
 
-  async listTokenLaunches(): Promise<TokenLaunch[]> {
-    return [...this.launches.values()].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  async listTokenLaunches(options: ListTokenLaunchesOptions = {}): Promise<TokenLaunch[]> {
+    const direction = options.order === "desc" ? -1 : 1;
+    const launches = [...this.launches.values()]
+      .filter((launch) => !options.createdAfter || launch.createdAt >= options.createdAfter)
+      .sort((a, b) => direction * (a.createdAt.getTime() - b.createdAt.getTime()));
+    return typeof options.limit === "number" ? launches.slice(0, options.limit) : launches;
   }
 
   async listTradeEvents(mint: string, upTo?: Date): Promise<TradeEvent[]> {
