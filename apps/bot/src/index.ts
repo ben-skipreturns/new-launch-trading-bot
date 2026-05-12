@@ -1437,7 +1437,8 @@ async function applyMigrations(store: PostgresStore): Promise<void> {
     "migrations/001_initial_schema.sql",
     "migrations/002_launch_readiness_indexes.sql",
     "migrations/003_live_launch_hardening.sql",
-    "migrations/004_latest_launch_state.sql"
+    "migrations/004_latest_launch_state.sql",
+    "migrations/005_trend_refresh_run_leases.sql"
   ];
   for (const file of files) {
     const sql = await readFile(file, "utf8");

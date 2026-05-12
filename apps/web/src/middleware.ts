@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 export function middleware(request: NextRequest) {
   const token = process.env.DASHBOARD_AUTH_TOKEN;
+  const authDisabled = process.env.NODE_ENV === "development" && process.env.DASHBOARD_AUTH_DISABLED === "true";
   if (!token) {
-    if (process.env.NODE_ENV === "development" || process.env.DASHBOARD_AUTH_DISABLED === "true") return NextResponse.next();
+    if (authDisabled) return NextResponse.next();
     return new NextResponse("Dashboard authentication is not configured", { status: 503 });
   }
 

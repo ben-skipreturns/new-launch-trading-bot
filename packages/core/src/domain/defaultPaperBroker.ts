@@ -56,36 +56,36 @@ export class DefaultPaperBroker implements PaperBroker {
 
   async onScore(score: ScoreSnapshot): Promise<PaperOrder | null> {
     if (score.decision !== "paper_buy") return null;
-    return this.withMutationLock(() => this.onScoreLocked(score));
+    return this.withMutationLock(() => this.store.runPaperBrokerMutation((store) => this.onScoreLocked(store, score)));
   }
 
   async onPrice(score: ScoreSnapshot): Promise<PaperOrder[]> {
     const priceSol = score.features.priceSol;
     if (!priceSol || !score.features.enrichmentFresh) return [];
-    return this.withMutationLock(() => this.onPriceLocked(score, priceSol));
+    return this.withMutationLock(() => this.store.runPaperBrokerMutation((store) => this.onPriceLocked(store, score, priceSol)));
   }
 
-  private async onScoreLocked(score: ScoreSnapshot): Promise<PaperOrder | null> {
-    const existing = await this.store.getOpenPosition(score.mint);
+  private async onScoreLocked(store: Store, score: ScoreSnapshot): Promise<PaperOrder | null> {
+    const existing = await store.getOpenPosition(score.mint);
     if (existing) return null;
 
-    const openPositions = await this.store.listOpenPositions();
+    const openPositions = await store.listOpenPositions();
     if (openPositions.length >= this.config.maxConcurrentPositions) {
-      return this.reject(score, "MAX_CONCURRENT_POSITIONS");
+      return this.reject(store, score, "MAX_CONCURRENT_POSITIONS");
     }
 
-    const launch = await this.store.getTokenLaunch(score.mint);
-    const exposureRejectReason = await this.exposureRejectReason(score, launch, openPositions);
-    if (exposureRejectReason) return this.reject(score, exposureRejectReason);
+    const launch = await store.getTokenLaunch(score.mint);
+    const exposureRejectReason = await this.exposureRejectReason(store, score, launch, openPositions);
+    if (exposureRejectReason) return this.reject(store, score, exposureRejectReason);
 
-    const spentToday = await this.spentOnDay(score.asOf);
+    const spentToday = await this.spentOnDay(store, score.asOf);
     if (spentToday + this.config.buySizeSol > this.config.dailySpendCapSol) {
-      return this.reject(score, "DAILY_SPEND_CAP");
+      return this.reject(store, score, "DAILY_SPEND_CAP");
     }
 
     const priceSol = score.features.priceSol;
     if (!priceSol || !score.features.enrichmentFresh) {
-      return this.reject(score, "STALE_OR_MISSING_PRICE");
+      return this.reject(store, score, "STALE_OR_MISSING_PRICE");
     }
 
     const feesSol = this.bps(this.config.buySizeSol, this.config.feeBps);
@@ -107,13 +107,13 @@ export class DefaultPaperBroker implements PaperBroker {
       ladderState: Object.fromEntries(this.config.takeProfitLadder.map((target) => [String(target.multiple), false]))
     };
 
-    await this.store.insertPaperOrder(order);
-    await this.store.upsertPaperPosition(position);
+    await store.insertPaperOrder(order);
+    await store.upsertPaperPosition(position);
     return order;
   }
 
-  private async onPriceLocked(score: ScoreSnapshot, priceSol: number): Promise<PaperOrder[]> {
-    const position = await this.store.getOpenPosition(score.mint);
+  private async onPriceLocked(store: Store, score: ScoreSnapshot, priceSol: number): Promise<PaperOrder[]> {
+    const position = await store.getOpenPosition(score.mint);
     if (!position) return [];
 
     position.highPriceSol = Math.max(position.highPriceSol, priceSol);
@@ -121,7 +121,7 @@ export class DefaultPaperBroker implements PaperBroker {
 
     for (const target of this.config.takeProfitLadder) {
       if (!position.ladderState[String(target.multiple)] && priceSol >= position.entryPriceSol * target.multiple) {
-        orders.push(await this.exit(score, position, target.portion * position.tokensBought, priceSol, target.reason));
+        orders.push(await this.exit(store, score, position, target.portion * position.tokensBought, priceSol, target.reason));
         position.ladderState[String(target.multiple)] = true;
       }
     }
@@ -133,11 +133,11 @@ export class DefaultPaperBroker implements PaperBroker {
       position.highPriceSol >= position.entryPriceSol * this.config.trailingStopActivationMultiple &&
       priceSol <= position.highPriceSol * (1 - this.config.trailingStopDrawdownPct);
     if (position.tokensOpen > 0 && priceSol <= position.stopPriceSol) {
-      orders.push(await this.exit(score, position, position.tokensOpen, priceSol, "stop_loss"));
+      orders.push(await this.exit(store, score, position, position.tokensOpen, priceSol, "stop_loss"));
     } else if (position.tokensOpen > 0 && trailingStop) {
-      orders.push(await this.exit(score, position, position.tokensOpen, priceSol, "trailing_stop"));
+      orders.push(await this.exit(store, score, position, position.tokensOpen, priceSol, "trailing_stop"));
     } else if (position.tokensOpen > 0 && timedOut) {
-      orders.push(await this.exit(score, position, position.tokensOpen, priceSol, "timeout"));
+      orders.push(await this.exit(store, score, position, position.tokensOpen, priceSol, "timeout"));
     }
 
     if (position.tokensOpen <= 1e-12) {
@@ -146,7 +146,7 @@ export class DefaultPaperBroker implements PaperBroker {
       position.avgExitPriceSol = round(position.solRealized / position.tokensBought);
     }
 
-    await this.store.upsertPaperPosition(position);
+    await store.upsertPaperPosition(position);
     return orders;
   }
 
@@ -165,6 +165,7 @@ export class DefaultPaperBroker implements PaperBroker {
   }
 
   private async exit(
+    store: Store,
     score: ScoreSnapshot,
     position: PaperPosition,
     tokenAmount: number,
@@ -190,14 +191,14 @@ export class DefaultPaperBroker implements PaperBroker {
       priceSol,
       feesSol
     };
-    await this.store.insertPaperOrder(order);
-    await this.store.insertExitEvent(exitEvent);
+    await store.insertPaperOrder(order);
+    await store.insertExitEvent(exitEvent);
     return order;
   }
 
-  private async reject(score: ScoreSnapshot, reason: string): Promise<PaperOrder> {
+  private async reject(store: Store, score: ScoreSnapshot, reason: string): Promise<PaperOrder> {
     const order = this.order(score, "buy", "rejected", reason, 0, 0, score.features.priceSol ?? 0, 0, 0);
-    await this.store.insertPaperOrder(order);
+    await store.insertPaperOrder(order);
     return order;
   }
 
@@ -232,9 +233,9 @@ export class DefaultPaperBroker implements PaperBroker {
     return amount * (bps / 10_000);
   }
 
-  private async exposureRejectReason(score: ScoreSnapshot, launch: TokenLaunch | undefined, openPositions: PaperPosition[]): Promise<string | null> {
+  private async exposureRejectReason(store: Store, score: ScoreSnapshot, launch: TokenLaunch | undefined, openPositions: PaperPosition[]): Promise<string | null> {
     const openMints = new Set(openPositions.map((position) => position.mint));
-    const filledBuyOrders = (await this.store.listPaperOrders(undefined, score.asOf)).filter(
+    const filledBuyOrders = (await store.listPaperOrders(undefined, score.asOf)).filter(
       (order) => order.side === "buy" && order.status === "filled"
     );
 
@@ -247,7 +248,7 @@ export class DefaultPaperBroker implements PaperBroker {
     if (launch?.creator) {
       let openCreatorCount = 0;
       for (const position of openPositions) {
-        const existingLaunch = await this.store.getTokenLaunch(position.mint);
+        const existingLaunch = await store.getTokenLaunch(position.mint);
         if (existingLaunch?.creator && existingLaunch.creator === launch.creator) openCreatorCount += 1;
       }
       if (openCreatorCount >= this.config.maxOpenPositionsPerCreator) return "MAX_CREATOR_EXPOSURE";
@@ -259,7 +260,7 @@ export class DefaultPaperBroker implements PaperBroker {
       let dailyFamilyBuys = 0;
       for (const order of filledBuyOrders) {
         if (isoDate(order.createdAt) !== day) continue;
-        const boughtLaunch = await this.store.getTokenLaunch(order.mint);
+        const boughtLaunch = await store.getTokenLaunch(order.mint);
         if (symbolFamilyKey(boughtLaunch) === symbolFamily) dailyFamilyBuys += 1;
       }
       if (dailyFamilyBuys >= this.config.maxDailyBuysPerSymbolFamily) return "MAX_SYMBOL_FAMILY_EXPOSURE";
@@ -268,9 +269,9 @@ export class DefaultPaperBroker implements PaperBroker {
     return null;
   }
 
-  private async spentOnDay(date: Date): Promise<number> {
+  private async spentOnDay(store: Store, date: Date): Promise<number> {
     const day = isoDate(date);
-    const orders = await this.store.listPaperOrders();
+    const orders = await store.listPaperOrders();
     return orders
       .filter((order) => order.side === "buy" && order.status === "filled" && isoDate(order.createdAt) === day)
       .reduce((total, order) => total + order.solAmount, 0);

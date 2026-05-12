@@ -137,9 +137,67 @@ describe("OpenAiMemeTrendSource", () => {
     expect((await store.listTrendRefreshRuns()).map((run) => run.status)).toEqual(["success", "skipped_duplicate"]);
   });
 
+  it("claims the refresh window before calling OpenAI", async () => {
+    const store = new MemoryStore();
+    let fetchCalls = 0;
+    let releaseFetch!: () => void;
+    let enteredFetch!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      enteredFetch = resolve;
+    });
+    const fetchRelease = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const source = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => {
+        fetchCalls += 1;
+        enteredFetch();
+        await fetchRelease;
+        return jsonResponse(openAiPayload());
+      }
+    });
+
+    const firstRefresh = source.fetchObservations();
+    await fetchStarted;
+    const duplicateObservations = await source.fetchObservations();
+    releaseFetch();
+    const observations = await firstRefresh;
+
+    expect(fetchCalls).toBe(1);
+    expect(duplicateObservations).toEqual([]);
+    expect(observations).toHaveLength(1);
+    expect((await store.listTrendRefreshRuns()).map((run) => run.status)).toEqual(["success", "skipped_duplicate"]);
+  });
+
+  it("records usage-derived cost when parsing a failed OpenAI response", async () => {
+    const store = new MemoryStore();
+    const source = new OpenAiMemeTrendSource({
+      apiKey: "test-key",
+      store,
+      now: () => new Date("2026-05-09T12:07:00.000Z"),
+      fetchFn: async () => jsonResponse({ ...openAiPayload(), output_text: "{not-json" })
+    });
+
+    await expect(source.fetchObservations()).rejects.toThrow();
+
+    const runs = await store.listTrendRefreshRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "error",
+      inputTokens: 1200,
+      cachedInputTokens: 200,
+      outputTokens: 500,
+      webSearchCalls: 1
+    });
+    expect(runs[0].estimatedCostUsd).toBeGreaterThan(0);
+  });
+
   it("skips refreshes when estimated spend would exceed the configured cap", async () => {
     const store = new MemoryStore();
-    await store.insertTrendRefreshRun(refreshRun({ estimatedCostUsd: 0.02 }));
+    await store.insertTrendRefreshRun(refreshRun({ estimatedCostUsd: 0.02, status: "error" }));
     const source = new OpenAiMemeTrendSource({
       apiKey: "test-key",
       store,

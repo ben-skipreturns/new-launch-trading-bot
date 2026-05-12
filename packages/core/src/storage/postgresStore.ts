@@ -292,21 +292,39 @@ interface Database {
 
 export class PostgresStore implements Store {
   readonly db: Kysely<Database>;
+  private readonly ownsConnection: boolean;
 
-  constructor(databaseUrl: string) {
-    this.db = new Kysely<Database>({
-      dialect: new PostgresDialect({
-        pool: new pg.Pool({ connectionString: databaseUrl })
-      })
-    });
+  constructor(databaseUrlOrDb: string | Kysely<Database>, ownsConnection = typeof databaseUrlOrDb === "string") {
+    this.ownsConnection = ownsConnection;
+    this.db =
+      typeof databaseUrlOrDb === "string"
+        ? new Kysely<Database>({
+            dialect: new PostgresDialect({
+              pool: new pg.Pool({ connectionString: databaseUrlOrDb })
+            })
+          })
+        : databaseUrlOrDb;
   }
 
   async close(): Promise<void> {
+    if (!this.ownsConnection) return;
     await this.db.destroy();
   }
 
   async runMigration(sqlText: string): Promise<void> {
     await sql.raw(sqlText).execute(this.db);
+  }
+
+  async runPaperBrokerMutation<T>(run: (store: Store) => Promise<T>): Promise<T> {
+    if (!this.ownsConnection) {
+      await sql`select pg_advisory_xact_lock(904206428, 1)`.execute(this.db);
+      return run(this);
+    }
+
+    return this.db.transaction().execute(async (trx) => {
+      await sql`select pg_advisory_xact_lock(904206428, 1)`.execute(trx);
+      return run(new PostgresStore(trx as unknown as Kysely<Database>, false));
+    });
   }
 
   async upsertRawEvent(event: LaunchEvent): Promise<void> {
@@ -656,6 +674,93 @@ export class PostgresStore implements Store {
       })
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
+  }
+
+  async tryStartTrendRefreshRun(run: TrendRefreshRun): Promise<boolean> {
+    const insertRun = async (db: Kysely<Database>): Promise<boolean> => {
+      const updated = await sql<{ id: string }>`
+        update trend_refresh_runs set
+          started_at = ${run.startedAt},
+          completed_at = ${run.completedAt ?? null},
+          status = ${run.status},
+          topics_found = ${run.topicsFound},
+          input_tokens = ${run.inputTokens},
+          cached_input_tokens = ${run.cachedInputTokens},
+          output_tokens = ${run.outputTokens},
+          web_search_calls = ${run.webSearchCalls},
+          estimated_cost_usd = ${String(run.estimatedCostUsd)},
+          response_id = ${run.responseId ?? null},
+          error_text = ${run.errorText ?? null},
+          raw = ${run.raw}::jsonb
+        where id = ${run.id}
+          and status not in ('running', 'success')
+          and not exists (
+            select 1
+            from trend_refresh_runs active_run
+            where active_run.source = ${run.source}
+              and active_run.model = ${run.model}
+              and active_run.prompt_version = ${run.promptVersion}
+              and active_run.refresh_window_started_at = ${run.refreshWindowStartedAt}
+              and active_run.status in ('running', 'success')
+              and active_run.id <> ${run.id}
+          )
+        returning id
+      `.execute(db);
+      if (updated.rows.length > 0) return true;
+
+      const inserted = await sql<{ id: string }>`
+        insert into trend_refresh_runs (
+          id,
+          source,
+          model,
+          prompt_version,
+          refresh_window_started_at,
+          refresh_window_ended_at,
+          started_at,
+          completed_at,
+          status,
+          topics_found,
+          input_tokens,
+          cached_input_tokens,
+          output_tokens,
+          web_search_calls,
+          estimated_cost_usd,
+          response_id,
+          error_text,
+          raw
+        )
+        values (
+          ${run.id},
+          ${run.source},
+          ${run.model},
+          ${run.promptVersion},
+          ${run.refreshWindowStartedAt},
+          ${run.refreshWindowEndedAt},
+          ${run.startedAt},
+          ${run.completedAt ?? null},
+          ${run.status},
+          ${run.topicsFound},
+          ${run.inputTokens},
+          ${run.cachedInputTokens},
+          ${run.outputTokens},
+          ${run.webSearchCalls},
+          ${String(run.estimatedCostUsd)},
+          ${run.responseId ?? null},
+          ${run.errorText ?? null},
+          ${run.raw}::jsonb
+        )
+        on conflict do nothing
+        returning id
+      `.execute(db);
+      return inserted.rows.length > 0;
+    };
+
+    if (!this.ownsConnection) return insertRun(this.db);
+
+    return this.db.transaction().execute(async (trx) => {
+      await sql`select pg_advisory_xact_lock(904206428, 2)`.execute(trx);
+      return insertRun(trx as unknown as Kysely<Database>);
+    });
   }
 
   async insertTrendRefreshRun(run: TrendRefreshRun): Promise<void> {

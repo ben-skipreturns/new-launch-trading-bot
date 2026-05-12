@@ -36,6 +36,7 @@ export class MemoryStore implements Store {
   readonly streamHealthRuns: StreamHealthRun[] = [];
   readonly memeMatches: TokenMemeMatch[] = [];
   readonly retentionRuns: RetentionRun[] = [];
+  private paperBrokerLock: Promise<void> = Promise.resolve();
 
   async upsertRawEvent(event: LaunchEvent): Promise<void> {
     this.rawEvents.set(`${event.source}:${event.signature}:${event.eventType}`, event);
@@ -93,6 +94,20 @@ export class MemoryStore implements Store {
     }
   }
 
+  async tryStartTrendRefreshRun(run: TrendRefreshRun): Promise<boolean> {
+    const existing = this.trendRefreshRuns.find(
+      (item) =>
+        item.source === run.source &&
+        item.model === run.model &&
+        item.promptVersion === run.promptVersion &&
+        item.refreshWindowStartedAt.getTime() === run.refreshWindowStartedAt.getTime() &&
+        (item.status === "running" || item.status === "success")
+    );
+    if (existing) return false;
+    await this.insertTrendRefreshRun(run);
+    return true;
+  }
+
   async insertTrendRefreshRun(run: TrendRefreshRun): Promise<void> {
     const existingIndex = this.trendRefreshRuns.findIndex((item) => item.id === run.id);
     if (existingIndex >= 0) {
@@ -122,6 +137,20 @@ export class MemoryStore implements Store {
 
   async insertRetentionRun(run: RetentionRun): Promise<void> {
     this.retentionRuns.push(run);
+  }
+
+  async runPaperBrokerMutation<T>(run: (store: Store) => Promise<T>): Promise<T> {
+    const previous = this.paperBrokerLock;
+    let release!: () => void;
+    this.paperBrokerLock = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await run(this);
+    } finally {
+      release();
+    }
   }
 
   async getTokenLaunch(mint: string): Promise<TokenLaunch | undefined> {

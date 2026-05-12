@@ -17,6 +17,26 @@ describe("dashboard middleware", () => {
     expect(response.status).toBe(503);
   });
 
+  it("does not honor the auth disabled flag outside development", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DASHBOARD_AUTH_TOKEN", "");
+    vi.stubEnv("DASHBOARD_AUTH_DISABLED", "true");
+
+    const response = middleware(request());
+
+    expect(response.status).toBe(503);
+  });
+
+  it("allows explicit local auth bypass in development", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("DASHBOARD_AUTH_TOKEN", "");
+    vi.stubEnv("DASHBOARD_AUTH_DISABLED", "true");
+
+    const response = middleware(request());
+
+    expect(response.status).toBe(200);
+  });
+
   it("accepts bearer auth with the configured dashboard token", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "secret");

@@ -257,6 +257,45 @@ export class OpenAiMemeTrendSource implements TrendSource {
       return [];
     }
 
+    const claimed = await this.tryStartRun({
+      id: runId,
+      source: this.name,
+      model: this.model,
+      promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
+      refreshWindowStartedAt: window.startedAt,
+      refreshWindowEndedAt: window.endedAt,
+      startedAt,
+      status: "running",
+      topicsFound: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      webSearchCalls: 0,
+      estimatedCostUsd: 0,
+      raw: { reason: "refresh lease claimed before OpenAI request" }
+    });
+    if (!claimed) {
+      await this.recordRun({
+        id: `${runId}:duplicate:${startedAt.toISOString()}`,
+        source: this.name,
+        model: this.model,
+        promptVersion: OPENAI_MEME_RADAR_PROMPT_VERSION,
+        refreshWindowStartedAt: window.startedAt,
+        refreshWindowEndedAt: window.endedAt,
+        startedAt,
+        completedAt: this.now(),
+        status: "skipped_duplicate",
+        topicsFound: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        webSearchCalls: 0,
+        estimatedCostUsd: 0,
+        raw: { reason: "refresh already running or successful for this source/model/window" }
+      });
+      return [];
+    }
+
     let responsePayload: OpenAiResponsePayload | undefined;
     try {
       const response = await this.fetchFn(this.endpoint, {
@@ -324,6 +363,11 @@ export class OpenAiMemeTrendSource implements TrendSource {
 
       return observations;
     } catch (error) {
+      const usage = responsePayload
+        ? usageFromResponse(responsePayload)
+        : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+      const webSearchCalls = responsePayload ? countWebSearchCalls(responsePayload) : 0;
+      const estimatedCostUsd = responsePayload ? estimateOpenAiTrendCost({ model: this.model, ...usage, webSearchCalls }) : 0;
       await this.recordRun({
         id: runId,
         source: this.name,
@@ -335,11 +379,9 @@ export class OpenAiMemeTrendSource implements TrendSource {
         completedAt: this.now(),
         status: "error",
         topicsFound: 0,
-        inputTokens: 0,
-        cachedInputTokens: 0,
-        outputTokens: 0,
-        webSearchCalls: 0,
-        estimatedCostUsd: 0,
+        ...usage,
+        webSearchCalls,
+        estimatedCostUsd,
         errorText: error instanceof Error ? error.message : String(error),
         raw: responsePayload ? (responsePayload as unknown as JsonValue) : {}
       });
@@ -416,6 +458,11 @@ export class OpenAiMemeTrendSource implements TrendSource {
 
   private async recordRun(run: TrendRefreshRun): Promise<void> {
     await this.options.store?.insertTrendRefreshRun(run);
+  }
+
+  private async tryStartRun(run: TrendRefreshRun): Promise<boolean> {
+    if (!this.options.store) return true;
+    return this.options.store.tryStartTrendRefreshRun(run);
   }
 }
 
@@ -720,7 +767,7 @@ function refreshWindow(now: Date, refreshMinutes: number): { startedAt: Date; en
 
 function sumBillableRuns(runs: TrendRefreshRun[]): number {
   return runs
-    .filter((run) => run.status === "success")
+    .filter((run) => run.status === "success" || run.status === "error")
     .reduce((sum, run) => sum + run.estimatedCostUsd, 0);
 }
 

@@ -36,10 +36,12 @@ export interface Store {
   insertExitEvent(event: ExitEvent): Promise<void>;
   upsertTrendTopic(topic: TrendTopic): Promise<void>;
   insertTrendObservation(observation: TrendObservation, topicId?: string): Promise<void>;
+  tryStartTrendRefreshRun(run: TrendRefreshRun): Promise<boolean>;
   insertTrendRefreshRun(run: TrendRefreshRun): Promise<void>;
   upsertStreamHealthRun(run: StreamHealthRun): Promise<void>;
   upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void>;
   insertRetentionRun(run: RetentionRun): Promise<void>;
+  runPaperBrokerMutation<T>(run: (store: Store) => Promise<T>): Promise<T>;
 
   getTokenLaunch(mint: string): Promise<TokenLaunch | undefined>;
   listTokenLaunches(options?: ListTokenLaunchesOptions): Promise<TokenLaunch[]>;
