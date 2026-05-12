@@ -38,8 +38,9 @@ export class DefaultFeatureExtractor implements FeatureExtractor {
 
     const enrichmentIsFresh = Boolean(enrichment && input.asOf.getTime() - enrichment.observedAt.getTime() <= this.enrichmentFreshMs);
     const latestTradePriceIsFresh = Boolean(
-      latestTrade?.priceSol && input.asOf.getTime() - latestTrade.occurredAt.getTime() <= this.enrichmentFreshMs
+      latestTrade?.priceSol !== undefined && input.asOf.getTime() - latestTrade.occurredAt.getTime() <= this.enrichmentFreshMs
     );
+    const freshPriceSol = (latestTradePriceIsFresh ? latestTrade?.priceSol : undefined) ?? (enrichmentIsFresh ? enrichment?.priceSol : undefined);
     const memeMatch = await this.store.getLatestTokenMemeMatch(input.launch.mint, input.asOf);
 
     const snapshot: FeatureSnapshot = {
@@ -67,8 +68,8 @@ export class DefaultFeatureExtractor implements FeatureExtractor {
       insiderShare: round(enrichment?.insiderShare ?? 0),
       bundlerShare: round(enrichment?.bundlerShare ?? 0),
       sniperShare: round(enrichment?.sniperShare ?? 0),
-      priceSol: latestTrade?.priceSol ?? enrichment?.priceSol,
-      marketCapSol: latestTrade?.marketCapSol ?? input.launch.marketCapSol,
+      priceSol: freshPriceSol,
+      marketCapSol: (latestTradePriceIsFresh ? latestTrade?.marketCapSol : undefined) ?? input.launch.marketCapSol,
       liquidityUsd: enrichment?.liquidityUsd,
       holderCount: enrichment?.holderCount,
       organicScore: enrichment?.organicScore,

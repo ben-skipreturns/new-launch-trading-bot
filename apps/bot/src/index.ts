@@ -1121,43 +1121,13 @@ async function runStreaming(
   options: LiveStreamingOptions = {}
 ): Promise<{ events: number }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), durationMs);
+  let timeout: NodeJS.Timeout | undefined;
   const stopBackgroundWork: BackgroundLoopHandle[] = [];
   let runFailure: unknown;
   const failRun = (error: unknown) => {
     if (!runFailure) runFailure = error;
     controller.abort();
   };
-  const processor = new EventProcessingPool({
-    concurrency: options.processingConcurrency ?? 1,
-    maxQueuedEvents: options.maxProcessingQueue ?? 100,
-    onFailure: (error) => {
-      console.error(`event processing failed: ${error instanceof Error ? error.message : String(error)}`);
-      failRun(error);
-    },
-    onMetrics: (metrics) => updateStreamProcessingHealth(options.store, options.health, metrics)
-  });
-  if (options.store) {
-    const supervisor = new LivePositionSupervisor(options.store, pipeline, {
-      openPositionSnapshotIntervalMs: options.positionCheckMs
-    });
-    stopBackgroundWork.push(
-      startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, () => supervisor.captureDueSnapshots(), controller, {
-        onFailure: failRun
-      })
-    );
-  }
-  if (options.store && options.trendRefreshMs) {
-    stopBackgroundWork.push(
-      startBackgroundLoop(
-        "trend-refresh",
-        options.trendRefreshMs,
-        () => refreshLiveTrendsOrFail(options.store as Store, { allowEmptyTopics: options.allowEmptyTrends }),
-        controller,
-        { runImmediately: false, onFailure: failRun }
-      )
-    );
-  }
   let events = 0;
   const seenLaunches = new Set<string>();
   try {
@@ -1172,6 +1142,38 @@ async function runStreaming(
           `Catch-up inspected ${result.inspected} persisted unscored launches and recovered ${result.processed} score snapshots.`
         );
       }
+    }
+
+    timeout = setTimeout(() => controller.abort(), durationMs);
+    const processor = new EventProcessingPool({
+      concurrency: options.processingConcurrency ?? 1,
+      maxQueuedEvents: options.maxProcessingQueue ?? 100,
+      onFailure: (error) => {
+        console.error(`event processing failed: ${error instanceof Error ? error.message : String(error)}`);
+        failRun(error);
+      },
+      onMetrics: (metrics) => updateStreamProcessingHealth(options.store, options.health, metrics)
+    });
+    if (options.store) {
+      const supervisor = new LivePositionSupervisor(options.store, pipeline, {
+        openPositionSnapshotIntervalMs: options.positionCheckMs
+      });
+      stopBackgroundWork.push(
+        startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, () => supervisor.captureDueSnapshots(), controller, {
+          onFailure: failRun
+        })
+      );
+    }
+    if (options.store && options.trendRefreshMs) {
+      stopBackgroundWork.push(
+        startBackgroundLoop(
+          "trend-refresh",
+          options.trendRefreshMs,
+          (signal) => refreshLiveTrendsOrFail(options.store as Store, { allowEmptyTopics: options.allowEmptyTrends, signal }),
+          controller,
+          { runImmediately: false, onFailure: failRun }
+        )
+      );
     }
 
     try {
@@ -1202,8 +1204,8 @@ async function runStreaming(
     }
     if (runFailure) throw runFailure;
   } finally {
-    clearTimeout(timeout);
-    await Promise.all(stopBackgroundWork.map((loop) => loop.stop()));
+    if (timeout) clearTimeout(timeout);
+    await Promise.all(stopBackgroundWork.map((loop) => loop.stop().catch(() => undefined)));
   }
   return { events };
 }
@@ -1284,23 +1286,34 @@ interface BackgroundLoopHandle {
 function startBackgroundLoop(
   name: string,
   intervalMs: number,
-  task: () => Promise<unknown>,
+  task: (signal: AbortSignal) => Promise<unknown>,
   controller: AbortController,
-  options: { runImmediately?: boolean; onFailure?: (error: unknown) => void } = {}
+  options: { runImmediately?: boolean; onFailure?: (error: unknown) => void; stopTimeoutMs?: number } = {}
 ): BackgroundLoopHandle {
   let stopped = false;
   let running: Promise<void> | undefined;
+  let runController: AbortController | undefined;
+  let stopPromise: Promise<void> | undefined;
+  const stopTimeoutMs = options.stopTimeoutMs ?? Math.max(5_000, Math.min(intervalMs, 30_000));
   const run = () => {
     if (running || stopped || controller.signal.aborted) return;
+    const taskController = new AbortController();
+    runController = taskController;
+    const abortFromParent = () => taskController.abort();
+    controller.signal.addEventListener("abort", abortFromParent, { once: true });
+    if (controller.signal.aborted) taskController.abort();
     running = (async () => {
       try {
-        await task();
+        await task(taskController.signal);
       } catch (error) {
+        if (taskController.signal.aborted && isAbortError(error)) return;
         console.error(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
         options.onFailure?.(error);
         controller.abort();
       } finally {
+        controller.signal.removeEventListener("abort", abortFromParent);
         running = undefined;
+        if (runController === taskController) runController = undefined;
       }
     })();
   };
@@ -1308,11 +1321,33 @@ function startBackgroundLoop(
   if (options.runImmediately ?? true) void run();
   return {
     async stop() {
-      stopped = true;
-      clearInterval(timer);
-      await running;
+      stopPromise ??= (async () => {
+        stopped = true;
+        clearInterval(timer);
+        runController?.abort();
+        if (running) await waitWithTimeout(running, stopTimeoutMs, `${name} did not stop within ${stopTimeoutMs}ms.`);
+      })();
+      await stopPromise;
     }
   };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message));
+}
+
+async function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function createPipeline(store: Store, enricher: Enricher): TradingPipeline {
@@ -1356,8 +1391,8 @@ async function refreshTrends(store: Store, sources: TrendSource[]) {
   return new MemeTrendEngine(store, sources).refresh();
 }
 
-async function refreshLiveTrendsOrFail(store: Store, options: { allowEmptyTopics?: boolean } = {}) {
-  const result = await new MemeTrendEngine(store, liveTrendSources(store), { failOnAllSourcesError: true }).refresh();
+async function refreshLiveTrendsOrFail(store: Store, options: { allowEmptyTopics?: boolean; signal?: AbortSignal } = {}) {
+  const result = await new MemeTrendEngine(store, liveTrendSources(store), { failOnAllSourcesError: true }).refresh(options.signal);
   if (!options.allowEmptyTopics) await assertActiveTrendTopics(store);
   return result;
 }

@@ -31,7 +31,7 @@ describe("parsePumpApiMessage", () => {
     expect(parsed.event?.tokenLaunch?.mint).toBe("Mint111");
   });
 
-  it("reports queue overflow instead of silently dropping launches", async () => {
+  it("treats queue overflow as terminal even when reconnect is enabled", async () => {
     let socket: FakeSocket | undefined;
     const statuses: PumpApiStreamStatusType[] = [];
     const feed = new PumpApiLaunchFeed({
@@ -40,7 +40,8 @@ describe("parsePumpApiMessage", () => {
         socket = new FakeSocket();
         return socket as unknown as WebSocket;
       },
-      reconnect: false,
+      reconnect: true,
+      initialReconnectDelayMs: 1,
       maxQueueSize: 1,
       onStatus: (event) => statuses.push(event.type)
     });
@@ -69,6 +70,7 @@ describe("parsePumpApiMessage", () => {
     await expect(run).rejects.toThrow(/queue exceeded/);
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(statuses).toContain("queue_overflow");
+    expect(statuses).not.toContain("reconnecting");
   });
 });
 

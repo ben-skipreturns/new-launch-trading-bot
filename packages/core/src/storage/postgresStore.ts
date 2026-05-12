@@ -325,47 +325,49 @@ export class PostgresStore implements Store {
   }
 
   async upsertTokenLaunch(launch: TokenLaunch): Promise<void> {
-    await this.db
-      .insertInto("token_launches")
-      .values({
-        mint: launch.mint,
-        source: launch.source,
-        signature: launch.signature,
-        pool: launch.pool,
-        creator: launch.creator ?? null,
-        name: launch.name ?? null,
-        symbol: launch.symbol ?? null,
-        uri: launch.uri ?? null,
-        supply: num(launch.supply),
-        created_at: launch.createdAt,
-        initial_buy_tokens: num(launch.initialBuyTokens),
-        initial_buy_sol: num(launch.initialBuySol),
-        v_sol_in_bonding_curve: num(launch.vSolInBondingCurve),
-        market_cap_sol: num(launch.marketCapSol),
-        raw: launch.raw
-      })
-      .onConflict((oc) =>
-        oc.column("mint").doUpdateSet({
-          raw: launch.raw,
+    await this.db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("token_launches")
+        .values({
+          mint: launch.mint,
+          source: launch.source,
+          signature: launch.signature,
+          pool: launch.pool,
+          creator: launch.creator ?? null,
           name: launch.name ?? null,
           symbol: launch.symbol ?? null,
           uri: launch.uri ?? null,
+          supply: num(launch.supply),
+          created_at: launch.createdAt,
+          initial_buy_tokens: num(launch.initialBuyTokens),
+          initial_buy_sol: num(launch.initialBuySol),
           v_sol_in_bonding_curve: num(launch.vSolInBondingCurve),
-          market_cap_sol: num(launch.marketCapSol)
+          market_cap_sol: num(launch.marketCapSol),
+          raw: launch.raw
         })
-      )
-      .execute();
+        .onConflict((oc) =>
+          oc.column("mint").doUpdateSet({
+            raw: launch.raw,
+            name: launch.name ?? null,
+            symbol: launch.symbol ?? null,
+            uri: launch.uri ?? null,
+            v_sol_in_bonding_curve: num(launch.vSolInBondingCurve),
+            market_cap_sol: num(launch.marketCapSol)
+          })
+        )
+        .execute();
 
-    await this.db
-      .insertInto("token_launch_status")
-      .values({
-        mint: launch.mint,
-        has_meme_match: false,
-        has_score: false,
-        latest_score_at: null
-      })
-      .onConflict((oc) => oc.column("mint").doNothing())
-      .execute();
+      await trx
+        .insertInto("token_launch_status")
+        .values({
+          mint: launch.mint,
+          has_meme_match: false,
+          has_score: false,
+          latest_score_at: null
+        })
+        .onConflict((oc) => oc.column("mint").doNothing())
+        .execute();
+    });
   }
 
   async upsertTradeEvent(event: TradeEvent): Promise<void> {
@@ -442,64 +444,66 @@ export class PostgresStore implements Store {
   }
 
   async insertScoreSnapshot(snapshot: ScoreSnapshot): Promise<void> {
-    await this.db
-      .insertInto("score_snapshots")
-      .values({
-        mint: snapshot.mint,
-        as_of: snapshot.asOf,
-        graduation_probability: String(snapshot.graduationProbability),
-        risk_score: String(snapshot.riskScore),
-        trend_score: String(snapshot.trendScore),
-        expected_value_score: String(snapshot.expectedValueScore),
-        decision: snapshot.decision,
-        reasons: snapshot.reasons,
-        feature_snapshot: snapshot.features as unknown as JsonValue
-      })
-      .execute();
+    await this.db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("score_snapshots")
+        .values({
+          mint: snapshot.mint,
+          as_of: snapshot.asOf,
+          graduation_probability: String(snapshot.graduationProbability),
+          risk_score: String(snapshot.riskScore),
+          trend_score: String(snapshot.trendScore),
+          expected_value_score: String(snapshot.expectedValueScore),
+          decision: snapshot.decision,
+          reasons: snapshot.reasons,
+          feature_snapshot: snapshot.features as unknown as JsonValue
+        })
+        .execute();
 
-    await sql`
-      insert into latest_score_snapshots (
-        mint,
-        as_of,
-        graduation_probability,
-        risk_score,
-        trend_score,
-        expected_value_score,
-        decision,
-        reasons,
-        feature_snapshot
-      )
-      values (
-        ${snapshot.mint},
-        ${snapshot.asOf},
-        ${String(snapshot.graduationProbability)},
-        ${String(snapshot.riskScore)},
-        ${String(snapshot.trendScore)},
-        ${String(snapshot.expectedValueScore)},
-        ${snapshot.decision},
-        ${snapshot.reasons},
-        ${snapshot.features as unknown as JsonValue}
-      )
-      on conflict (mint) do update set
-        as_of = excluded.as_of,
-        graduation_probability = excluded.graduation_probability,
-        risk_score = excluded.risk_score,
-        trend_score = excluded.trend_score,
-        expected_value_score = excluded.expected_value_score,
-        decision = excluded.decision,
-        reasons = excluded.reasons,
-        feature_snapshot = excluded.feature_snapshot
-      where latest_score_snapshots.as_of <= excluded.as_of
-    `.execute(this.db);
+      await sql`
+        insert into latest_score_snapshots (
+          mint,
+          as_of,
+          graduation_probability,
+          risk_score,
+          trend_score,
+          expected_value_score,
+          decision,
+          reasons,
+          feature_snapshot
+        )
+        values (
+          ${snapshot.mint},
+          ${snapshot.asOf},
+          ${String(snapshot.graduationProbability)},
+          ${String(snapshot.riskScore)},
+          ${String(snapshot.trendScore)},
+          ${String(snapshot.expectedValueScore)},
+          ${snapshot.decision},
+          ${snapshot.reasons},
+          ${snapshot.features as unknown as JsonValue}
+        )
+        on conflict (mint) do update set
+          as_of = excluded.as_of,
+          graduation_probability = excluded.graduation_probability,
+          risk_score = excluded.risk_score,
+          trend_score = excluded.trend_score,
+          expected_value_score = excluded.expected_value_score,
+          decision = excluded.decision,
+          reasons = excluded.reasons,
+          feature_snapshot = excluded.feature_snapshot
+        where latest_score_snapshots.as_of <= excluded.as_of
+      `.execute(trx);
 
-    await sql`
-      insert into token_launch_status (mint, has_meme_match, has_score, latest_score_at, updated_at)
-      values (${snapshot.mint}, false, true, ${snapshot.asOf}, now())
-      on conflict (mint) do update set
-        has_score = true,
-        latest_score_at = greatest(coalesce(token_launch_status.latest_score_at, excluded.latest_score_at), excluded.latest_score_at),
-        updated_at = now()
-    `.execute(this.db);
+      await sql`
+        insert into token_launch_status (mint, has_meme_match, has_score, latest_score_at, updated_at)
+        values (${snapshot.mint}, false, true, ${snapshot.asOf}, now())
+        on conflict (mint) do update set
+          has_score = true,
+          latest_score_at = greatest(coalesce(token_launch_status.latest_score_at, excluded.latest_score_at), excluded.latest_score_at),
+          updated_at = now()
+      `.execute(trx);
+    });
   }
 
   async insertPaperOrder(order: PaperOrder): Promise<void> {
@@ -715,23 +719,12 @@ export class PostgresStore implements Store {
   }
 
   async upsertTokenMemeMatch(match: TokenMemeMatch): Promise<void> {
-    await this.db
-      .insertInto("token_meme_matches")
-      .values({
-        mint: match.mint,
-        observed_at: match.observedAt,
-        meme_relevance_score: String(match.memeRelevanceScore),
-        topic_id: match.topicId ?? null,
-        canonical_phrase: match.canonicalPhrase ?? null,
-        topic_type: match.topicType ?? null,
-        aliases: match.aliases,
-        evidence_urls: match.evidenceUrls,
-        reasons: match.reasons,
-        reject_flags: match.rejectFlags,
-        raw: match.raw
-      })
-      .onConflict((oc) =>
-        oc.columns(["mint", "observed_at"]).doUpdateSet({
+    await this.db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("token_meme_matches")
+        .values({
+          mint: match.mint,
+          observed_at: match.observedAt,
           meme_relevance_score: String(match.memeRelevanceScore),
           topic_id: match.topicId ?? null,
           canonical_phrase: match.canonicalPhrase ?? null,
@@ -742,16 +735,29 @@ export class PostgresStore implements Store {
           reject_flags: match.rejectFlags,
           raw: match.raw
         })
-      )
-      .execute();
+        .onConflict((oc) =>
+          oc.columns(["mint", "observed_at"]).doUpdateSet({
+            meme_relevance_score: String(match.memeRelevanceScore),
+            topic_id: match.topicId ?? null,
+            canonical_phrase: match.canonicalPhrase ?? null,
+            topic_type: match.topicType ?? null,
+            aliases: match.aliases,
+            evidence_urls: match.evidenceUrls,
+            reasons: match.reasons,
+            reject_flags: match.rejectFlags,
+            raw: match.raw
+          })
+        )
+        .execute();
 
-    await sql`
-      insert into token_launch_status (mint, has_meme_match, has_score, latest_score_at, updated_at)
-      values (${match.mint}, true, false, null, now())
-      on conflict (mint) do update set
-        has_meme_match = true,
-        updated_at = now()
-    `.execute(this.db);
+      await sql`
+        insert into token_launch_status (mint, has_meme_match, has_score, latest_score_at, updated_at)
+        values (${match.mint}, true, false, null, now())
+        on conflict (mint) do update set
+          has_meme_match = true,
+          updated_at = now()
+      `.execute(trx);
+    });
   }
 
   async insertRetentionRun(run: RetentionRun): Promise<void> {

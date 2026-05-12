@@ -90,6 +90,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
       let staleEmitted = false;
       let lastMessageReceivedAt = Date.now();
       let latestSocketError: Error | undefined;
+      let fatalSocketError: Error | undefined;
 
       const pushClosed = () => {
         queue.push({ closed: true });
@@ -114,6 +115,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
           if (parsed.event) {
             if (queue.length >= this.maxQueueSize) {
               latestSocketError = new Error(`PumpApi event queue exceeded ${this.maxQueueSize} pending events.`);
+              fatalSocketError = latestSocketError;
               this.emitStatus({
                 type: "queue_overflow",
                 at: new Date(),
@@ -184,6 +186,8 @@ export class PumpApiLaunchFeed implements LaunchFeed {
         latestSocketError = error;
         this.emitStatus({ type: "error", at: new Date(), attempt, errorText: error.message, lastEventAt });
       }
+
+      if (!signal?.aborted && fatalSocketError) throw fatalSocketError;
 
       const reconnectsExhausted = attempt >= this.maxReconnects;
       if (signal?.aborted || !this.reconnect || reconnectsExhausted) {
