@@ -42,6 +42,19 @@ describe("normalizePumpApiEvent", () => {
     expect(normalizePumpApiEvent({ signature: "sig-unknown", txType: "comment", mint: "Mint111" })).toBeNull();
   });
 
+  it("falls back to a valid timestamp when PumpApi sends an invalid timestamp string", () => {
+    const event = normalizePumpApiEvent({
+      signature: "sig-invalid-time",
+      txType: "create",
+      mint: "MintTime111",
+      timestamp: "not-a-date"
+    });
+
+    expect(event?.timestamp).toBeInstanceOf(Date);
+    expect(Number.isNaN(event?.timestamp.getTime())).toBe(false);
+    expect(Number.isNaN(event?.tokenLaunch?.createdAt.getTime())).toBe(false);
+  });
+
   it("deduces bot-like and wash flags on trade events", () => {
     const event = normalizePumpApiEvent({
       signature: "sig-buy",

@@ -121,6 +121,7 @@ program
     if (options.source === "pumpapi" && !options.databaseUrl) throw new Error("DATABASE_URL is required for live pumpapi ingestion.");
     const store = createStore(options.databaseUrl);
     const health = options.source === "pumpapi" ? createStreamHealthRun(options.source) : undefined;
+    const shutdown = createShutdownSignal();
     try {
       if (options.source === "fixture") {
         await refreshTrends(store, fixtureTrendSources());
@@ -130,10 +131,10 @@ program
       }
 
       if (health) await store.upsertStreamHealthRun(health);
-      await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends });
+      await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends, signal: shutdown.signal });
       const feed = createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health));
       const pipeline = createPipeline(store, liveEnricher());
-      const durationMs = Number(options.durationSeconds) * 1000;
+      const durationMs = parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000;
       const result = await runStreaming(feed, pipeline, durationMs, {
         store,
         health,
@@ -143,14 +144,21 @@ program
         maxProcessingQueue: parsePositiveIntegerOption(options.maxProcessingQueue, "--max-processing-queue"),
         catchUpLimit: parseNonNegativeIntegerOption(options.catchUpLimit, "--catch-up-limit"),
         catchUpHours: parsePositiveNumberOption(options.catchUpHours, "--catch-up-hours"),
-        allowEmptyTrends: options.allowEmptyTrends
+        allowEmptyTrends: options.allowEmptyTrends,
+        signal: shutdown.signal
       });
-      if (health) await finishStreamHealthRun(store, health, "completed");
+      if (health) await finishStreamHealthRun(store, health, shutdown.signal.aborted ? "aborted" : "completed");
       console.log(`Processed ${result.events} live events.`);
     } catch (error) {
-      if (health) await finishStreamHealthRun(store, health, "error", error);
+      const aborted = shutdown.signal.aborted && isAbortError(error);
+      if (health) await finishStreamHealthRun(store, health, aborted ? "aborted" : "error", aborted ? undefined : error);
+      if (aborted) {
+        console.log("Live ingestion aborted.");
+        return;
+      }
       throw error;
     } finally {
+      shutdown.dispose();
       await closeStore(store);
     }
   });
@@ -171,22 +179,30 @@ program
     if (options.persist && !options.databaseUrl) throw new Error("DATABASE_URL is required when using --persist.");
     const store = options.persist ? createStore(options.databaseUrl) : undefined;
     const health = createStreamHealthRun(options.source);
+    const shutdown = createShutdownSignal();
     try {
       if (store) await store.upsertStreamHealthRun(health);
       const result = await runLaunchStreamTest(createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)), {
         durationMs: parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000,
         maxLaunches: parsePositiveIntegerOption(options.maxLaunches, "--max-launches"),
         store,
-        health
+        health,
+        signal: shutdown.signal
       });
-      await finishStreamHealthRun(store, health, "completed");
+      await finishStreamHealthRun(store, health, shutdown.signal.aborted ? "aborted" : "completed");
       console.log(
         `Stream test complete: ${result.events} events read, ${result.launches} launches, ${result.ignoredEvents} non-create events ignored, ${result.persistedLaunches} launches persisted, ${result.duplicateLaunches} duplicates, ${health?.parserRejects ?? 0} parser rejects, ${formatRate(health?.launchesPerMinute)} launches/min.`
       );
     } catch (error) {
-      await finishStreamHealthRun(store, health, "error", error);
+      const aborted = shutdown.signal.aborted && isAbortError(error);
+      await finishStreamHealthRun(store, health, aborted ? "aborted" : "error", aborted ? undefined : error);
+      if (aborted) {
+        console.log("Stream test aborted.");
+        return;
+      }
       throw error;
     } finally {
+      shutdown.dispose();
       if (store) await closeStore(store);
     }
   });
@@ -200,13 +216,19 @@ program
   .action(async (options: { databaseUrl?: string; fixture: boolean; allowEmptyTrends: boolean }) => {
     if (!options.fixture && !options.databaseUrl) throw new Error("DATABASE_URL is required for live trend-refresh.");
     const store = createStore(options.databaseUrl);
+    const shutdown = createShutdownSignal();
     try {
       const result = options.fixture
         ? await refreshTrends(store, fixtureTrendSources())
-        : await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends });
+        : await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends, signal: shutdown.signal });
+      if (shutdown.signal.aborted) {
+        console.log("Trend refresh aborted.");
+        return;
+      }
       console.log(`Stored ${result.observations.length} trend observations and ${result.topics.length} topics.`);
       if (!options.fixture) await printLatestTrendRefreshRun(store);
     } finally {
+      shutdown.dispose();
       await closeStore(store);
     }
   });
@@ -358,17 +380,30 @@ program
 
     const store = createStore(options.databaseUrl);
     const health = !options.dryRun ? createStreamHealthRun(options.source) : undefined;
+    const shutdown = createShutdownSignal();
     try {
       if (health) await store.upsertStreamHealthRun(health);
-      const result = await runMatchStream(createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)), store, options, health);
-      if (health) await finishStreamHealthRun(store, health, "completed");
+      const result = await runMatchStream(
+        createLaunchFeed(options.source, options.fixture, streamFeedOptions(options, store, health)),
+        store,
+        options,
+        health,
+        shutdown.signal
+      );
+      if (health) await finishStreamHealthRun(store, health, shutdown.signal.aborted ? "aborted" : "completed");
       console.log(
         `Match stream complete: ${result.events} events read, ${result.launches} launches, ${result.matched} matched (${result.passed} pass, ${result.rejected} reject), ${result.persisted} persisted, ${result.duplicateLaunches} duplicates, ${health?.parserRejects ?? 0} parser rejects, ${formatRate(health?.launchesPerMinute)} launches/min.`
       );
     } catch (error) {
-      if (health) await finishStreamHealthRun(store, health, "error", error);
+      const aborted = shutdown.signal.aborted && isAbortError(error);
+      if (health) await finishStreamHealthRun(store, health, aborted ? "aborted" : "error", aborted ? undefined : error);
+      if (aborted) {
+        console.log("Match stream aborted.");
+        return;
+      }
       throw error;
     } finally {
+      shutdown.dispose();
       await closeStore(store);
     }
   });
@@ -438,14 +473,19 @@ program
       if (!options.databaseUrl) throw new Error("DATABASE_URL is required for retention-prune.");
       const store = createStore(options.databaseUrl);
       try {
+        const rejectedRawRetentionHours = parsePositiveNumberOption(options.rejectedHours, "--rejected-hours");
+        const interestingRawRetentionDays = parsePositiveNumberOption(options.interestingDays, "--interesting-days");
+        const rawLaunchRetentionHours = parsePositiveNumberOption(options.rawLaunchHours, "--raw-launch-hours");
+        const matchedLaunchRetentionDays = parsePositiveNumberOption(options.matchedLaunchDays, "--matched-launch-days");
+        const rejectedLaunchRetentionDays = parsePositiveNumberOption(options.rejectedLaunchDays, "--rejected-launch-days");
         const result = await store.pruneRetention({
           now: new Date(),
-          rejectedRawRetentionHours: Number(options.rejectedHours),
-          interestingRawRetentionDays: Number(options.interestingDays),
+          rejectedRawRetentionHours,
+          interestingRawRetentionDays,
           pruneLaunches: options.pruneLaunches,
-          rawLaunchRetentionHours: Number(options.rawLaunchHours),
-          matchedLaunchRetentionDays: Number(options.matchedLaunchDays),
-          rejectedLaunchRetentionDays: Number(options.rejectedLaunchDays),
+          rawLaunchRetentionHours,
+          matchedLaunchRetentionDays,
+          rejectedLaunchRetentionDays,
           dryRun: options.dryRun
         });
         console.log(
@@ -619,6 +659,38 @@ function createStreamHealthRun(source: string): StreamHealthRun {
     parserRejectRate: 0,
     raw: { statusEvents: [] }
   };
+}
+
+interface ShutdownSignal {
+  signal: AbortSignal;
+  dispose(): void;
+}
+
+function createShutdownSignal(): ShutdownSignal {
+  const controller = new AbortController();
+  let aborting = false;
+  const handleSignal = (signalName: NodeJS.Signals) => {
+    if (aborting) process.exit(shutdownExitCode(signalName));
+    aborting = true;
+    process.exitCode = shutdownExitCode(signalName);
+    console.error(`Received ${signalName}; shutting down gracefully.`);
+    controller.abort();
+  };
+  const onSigint = () => handleSignal("SIGINT");
+  const onSigterm = () => handleSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  return {
+    signal: controller.signal,
+    dispose() {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+    }
+  };
+}
+
+function shutdownExitCode(signalName: NodeJS.Signals): number {
+  return signalName === "SIGINT" ? 130 : 143;
 }
 
 function createStreamStatusHandler(store: Store | undefined, health: StreamHealthRun): (event: PumpApiStreamStatusEvent) => void {
@@ -843,10 +915,13 @@ function isJsonRecord(value: JsonValue): value is Record<string, JsonValue> {
 
 async function runLaunchStreamTest(
   feed: LaunchFeed,
-  options: { durationMs: number; maxLaunches: number; store?: Store; health?: StreamHealthRun }
+  options: { durationMs: number; maxLaunches: number; store?: Store; health?: StreamHealthRun; signal?: AbortSignal }
 ): Promise<{ events: number; launches: number; ignoredEvents: number; persistedLaunches: number; duplicateLaunches: number }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.durationMs);
+  const abortFromParent = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
   const seenLaunches = new Set<string>();
   let events = 0;
   let launches = 0;
@@ -880,6 +955,7 @@ async function runLaunchStreamTest(
     }
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromParent);
   }
 
   return { events, launches, ignoredEvents, persistedLaunches, duplicateLaunches };
@@ -889,31 +965,35 @@ async function runMatchStream(
   feed: LaunchFeed,
   store: Store,
   options: MatchStreamOptions,
-  health?: StreamHealthRun
+  health?: StreamHealthRun,
+  signal?: AbortSignal
 ): Promise<{ events: number; launches: number; matched: number; passed: number; rejected: number; persisted: number; duplicateLaunches: number }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), parsePositiveNumberOption(options.durationSeconds, "--duration-seconds") * 1000);
-  const observedAt = new Date();
-  const topicStore = options.fixtureTopics && options.dryRun ? new MemoryStore() : store;
-  if (options.fixtureTopics) {
-    await refreshTrends(topicStore, fixtureTrendSources());
-  } else if (options.refreshTrends) {
-    await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends });
-  }
-  const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
-  const matcher = createTokenMemeMatcher(parseNumberOption(options.minScore, "--min-score"), options.fixtureTopics);
-  const metadataTimeoutMs = parsePositiveIntegerOption(options.metadataTimeoutMs, "--metadata-timeout-ms");
-  const maxLaunches = parsePositiveIntegerOption(options.maxLaunches, "--max-launches");
-  const seenLaunches = new Set<string>();
-  let events = 0;
-  let launches = 0;
-  let matched = 0;
-  let passed = 0;
-  let rejected = 0;
-  let persisted = 0;
-  let duplicateLaunches = 0;
-
+  const abortFromParent = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", abortFromParent, { once: true });
   try {
+    const observedAt = new Date();
+    const topicStore = options.fixtureTopics && options.dryRun ? new MemoryStore() : store;
+    if (options.fixtureTopics) {
+      await refreshTrends(topicStore, fixtureTrendSources());
+    } else if (options.refreshTrends) {
+      await refreshLiveTrendsOrFailWithTimeout(store, { allowEmptyTopics: options.allowEmptyTrends, signal: controller.signal });
+    }
+    const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
+    const matcher = createTokenMemeMatcher(parseNumberOption(options.minScore, "--min-score"), options.fixtureTopics);
+    const metadataTimeoutMs = parsePositiveIntegerOption(options.metadataTimeoutMs, "--metadata-timeout-ms");
+    const maxLaunches = parsePositiveIntegerOption(options.maxLaunches, "--max-launches");
+    const seenLaunches = new Set<string>();
+    let events = 0;
+    let launches = 0;
+    let matched = 0;
+    let passed = 0;
+    let rejected = 0;
+    let persisted = 0;
+    let duplicateLaunches = 0;
+
     for await (const event of feed.stream(controller.signal)) {
       events += 1;
       if (!event.tokenLaunch) {
@@ -933,7 +1013,8 @@ async function runMatchStream(
       const enrichment = await getMatchingEnrichment(store, event.tokenLaunch, {
         fetchMetadata: !options.skipMetadata,
         persist: !options.dryRun,
-        timeoutMs: metadataTimeoutMs
+        timeoutMs: metadataTimeoutMs,
+        signal: controller.signal
       });
       const saturation = await buildMemeMatchSaturationContext(store, event.tokenLaunch, event.timestamp);
       const match = await matcher.match({ launch: event.tokenLaunch, topics, enrichment, saturation, observedAt: event.timestamp });
@@ -951,14 +1032,15 @@ async function runMatchStream(
         break;
       }
     }
+
+    if (topics.length === 0) {
+      console.log("No topics were available. Run trend-refresh first, use --refresh-trends, or use --fixture-topics for a deterministic check.");
+    }
+    return { events, launches, matched, passed, rejected, persisted, duplicateLaunches };
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortFromParent);
   }
-
-  if (topics.length === 0) {
-    console.log("No topics were available. Run trend-refresh first, use --refresh-trends, or use --fixture-topics for a deterministic check.");
-  }
-  return { events, launches, matched, passed, rejected, persisted, duplicateLaunches };
 }
 
 function createLaunchFeed(source: string, fixturePath: string, options?: PumpApiFeedCliOptions): LaunchFeed {
@@ -1089,14 +1171,14 @@ function escapeMarkdownTableCell(value: string): string {
 async function getMatchingEnrichment(
   store: Store,
   launch: TokenLaunch,
-  options: { fetchMetadata: boolean; persist: boolean; timeoutMs: number }
+  options: { fetchMetadata: boolean; persist: boolean; timeoutMs: number; signal?: AbortSignal }
 ): Promise<TokenEnrichment | null> {
   const existing = await store.getLatestEnrichment(launch.mint);
   if (!options.fetchMetadata) return existing ?? null;
   if (hasMetadataEnrichment(existing)) return existing ?? null;
 
   try {
-    const metadata = await new TokenMetadataEnricher({ timeoutMs: options.timeoutMs }).enrich(launch);
+    const metadata = await new TokenMetadataEnricher({ timeoutMs: options.timeoutMs }).enrich(launch, options.signal);
     if (!metadata) return existing ?? null;
     if (options.persist) await store.upsertTokenEnrichment(metadata);
     return metadata;
@@ -1184,6 +1266,9 @@ async function runStreaming(
   options: LiveStreamingOptions = {}
 ): Promise<{ events: number }> {
   const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
   let timeout: NodeJS.Timeout | undefined;
   const stopBackgroundWork: BackgroundLoopHandle[] = [];
   let runFailure: unknown;
@@ -1268,6 +1353,7 @@ async function runStreaming(
     if (runFailure) throw runFailure;
   } finally {
     if (timeout) clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromParent);
     await Promise.all(stopBackgroundWork.map((loop) => loop.stop().catch(() => undefined)));
   }
   return { events };
@@ -1324,6 +1410,7 @@ interface LiveStreamingOptions {
   allowEmptyTrends?: boolean;
   catchUpLimit?: number;
   catchUpHours?: number;
+  signal?: AbortSignal;
 }
 
 function updateStreamProcessingHealth(store: Store | undefined, health: StreamHealthRun | undefined, metrics: EventProcessingMetrics): void {

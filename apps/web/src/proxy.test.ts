@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { middleware } from "./middleware";
+import { proxy } from "./proxy";
 
-describe("dashboard middleware", () => {
+describe("dashboard proxy", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -12,7 +12,7 @@ describe("dashboard middleware", () => {
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "");
     vi.stubEnv("DASHBOARD_AUTH_DISABLED", "");
 
-    const response = middleware(request());
+    const response = proxy(request());
 
     expect(response.status).toBe(503);
   });
@@ -22,7 +22,7 @@ describe("dashboard middleware", () => {
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "");
     vi.stubEnv("DASHBOARD_AUTH_DISABLED", "true");
 
-    const response = middleware(request());
+    const response = proxy(request());
 
     expect(response.status).toBe(503);
   });
@@ -32,7 +32,7 @@ describe("dashboard middleware", () => {
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "");
     vi.stubEnv("DASHBOARD_AUTH_DISABLED", "true");
 
-    const response = middleware(request());
+    const response = proxy(request());
 
     expect(response.status).toBe(200);
   });
@@ -41,7 +41,19 @@ describe("dashboard middleware", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "secret");
 
-    const response = middleware(request({ authorization: "Bearer secret" }));
+    const response = proxy(request({ authorization: "Bearer secret" }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("accepts basic auth when the token contains colon characters", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DASHBOARD_AUTH_TOKEN", "secret:with:colons");
+
+    const credentials = btoa("operator:secret:with:colons");
+    const response = proxy(request({ authorization: `Basic ${credentials}` }));
 
     expect(response.status).toBe(200);
   });
@@ -50,8 +62,8 @@ describe("dashboard middleware", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "secret");
 
-    expect(middleware(request()).status).toBe(401);
-    expect(middleware(request({ authorization: "Bearer wrong" })).status).toBe(401);
+    expect(proxy(request()).status).toBe(401);
+    expect(proxy(request({ authorization: "Bearer wrong" })).status).toBe(401);
   });
 });
 

@@ -5,7 +5,7 @@
   "description": "Dry-run Solana launchpad paper trader for new meme-token launches.",
   "packageManager": "npm@11.4.2",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "npm run build --workspaces",
@@ -37,7 +37,7 @@
     "@types/ws": "^8.5.13",
     "commander": "^12.1.0",
     "dotenv": "^16.4.7",
-    "kysely": "^0.27.5",
+    "kysely": "^0.29.0",
     "pg": "^8.13.1",
     "ws": "^8.18.0",
     "zod": "^3.24.1"

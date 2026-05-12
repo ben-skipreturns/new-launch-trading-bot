@@ -12,7 +12,7 @@
   "dependencies": {
     "@moonshot/core": "0.1.0",
     "dotenv": "^16.4.7",
-    "next": "^15.5.7",
+    "next": "^16.2.6",
     "pg": "^8.13.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
@@ -23,7 +23,7 @@
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "autoprefixer": "^10.4.21",
-    "postcss": "^8.5.6",
+    "postcss": "^8.5.14",
     "tailwindcss": "^3.4.18"
   }
 }

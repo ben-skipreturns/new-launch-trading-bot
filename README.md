@@ -19,6 +19,8 @@ This is experimental research software for extremely speculative assets. It does
 
 ## Quick Start
 
+Prerequisites: Node.js 22 or newer and npm 11.
+
 ```bash
 npm install
 npm run demo
@@ -45,11 +47,11 @@ npm run start --workspace @moonshot/bot -- ingest --source pumpapi --duration-se
 npm run start --workspace @moonshot/bot -- report --database-url "$DATABASE_URL" --report reports/live.md
 ```
 
-Optional provider keys:
+Live provider configuration:
 
-- `OPENAI_API_KEY` for live meme trend discovery.
-- `BIRDEYE_API_KEY`
-- `PUMPAPI_STREAM_URL`
+- `OPENAI_API_KEY` is required for live meme trend discovery and live ingest.
+- `BIRDEYE_API_KEY` is optional metadata enrichment.
+- `PUMPAPI_STREAM_URL` is optional when overriding the default PumpApi stream endpoint.
 
 The live path still only paper trades. `DisabledExecutionAdapter` throws if live execution is attempted.
 
@@ -77,7 +79,7 @@ Live ingest refreshes trends on `OPENAI_TREND_REFRESH_MINUTES`, captures due age
 
 ## Command Center
 
-The web app lives at `apps/web` and is intentionally read-only in v1. It uses `DATABASE_URL` to query the existing Postgres schema and shows an error panel if the database is unavailable instead of crashing the shell. Set `DASHBOARD_AUTH_TOKEN` before exposing it outside local development; the middleware accepts either `Authorization: Bearer <token>` or HTTP Basic auth with the token as the password.
+The web app lives at `apps/web` and is intentionally read-only in v1. It uses `DATABASE_URL` to query the existing Postgres schema and shows an error panel if the database is unavailable instead of crashing the shell. Set `DATABASE_URL` and `DASHBOARD_AUTH_TOKEN` in the deployment environment before exposing it outside local development; the request proxy accepts either `Authorization: Bearer <token>` or HTTP Basic auth with the token as the password.
 
 ```bash
 docker compose up -d db

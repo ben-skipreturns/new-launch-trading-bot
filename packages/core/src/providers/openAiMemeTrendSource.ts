@@ -185,18 +185,18 @@ export class OpenAiMemeTrendSource implements TrendSource {
       throw new Error("OPENAI_API_KEY is required for live OpenAI meme trend refresh.");
     }
     this.model = options.model ?? process.env.OPENAI_TREND_MODEL ?? "gpt-5.4-mini";
-    this.refreshMinutes = numberOption(options.refreshMinutes, process.env.OPENAI_TREND_REFRESH_MINUTES, 15);
-    this.monthlyBudgetUsd = numberOption(options.monthlyBudgetUsd, process.env.OPENAI_TREND_MONTHLY_BUDGET_USD, 1000);
-    this.dailyBudgetUsd = numberOption(options.dailyBudgetUsd, process.env.OPENAI_TREND_DAILY_BUDGET_USD, 100);
-    this.estimatedRefreshCostUsd = numberOption(
+    this.refreshMinutes = positiveNumberOption(options.refreshMinutes, process.env.OPENAI_TREND_REFRESH_MINUTES, 15);
+    this.monthlyBudgetUsd = nonNegativeNumberOption(options.monthlyBudgetUsd, process.env.OPENAI_TREND_MONTHLY_BUDGET_USD, 1000);
+    this.dailyBudgetUsd = nonNegativeNumberOption(options.dailyBudgetUsd, process.env.OPENAI_TREND_DAILY_BUDGET_USD, 100);
+    this.estimatedRefreshCostUsd = nonNegativeNumberOption(
       options.estimatedRefreshCostUsd,
       process.env.OPENAI_TREND_ESTIMATED_REFRESH_COST_USD,
       0.1
     );
-    this.staleLeaseMs = numberOption(options.staleLeaseMinutes, process.env.OPENAI_TREND_STALE_LEASE_MINUTES, 30) * 60 * 1000;
-    this.maxTopics = numberOption(options.maxTopics, process.env.OPENAI_TREND_MAX_TOPICS, 20);
-    this.maxToolCalls = numberOption(options.maxToolCalls, process.env.OPENAI_TREND_MAX_TOOL_CALLS, 2);
-    this.maxOutputTokens = numberOption(options.maxOutputTokens, process.env.OPENAI_TREND_MAX_OUTPUT_TOKENS, 12000);
+    this.staleLeaseMs = positiveNumberOption(options.staleLeaseMinutes, process.env.OPENAI_TREND_STALE_LEASE_MINUTES, 30) * 60 * 1000;
+    this.maxTopics = positiveIntegerOption(options.maxTopics, process.env.OPENAI_TREND_MAX_TOPICS, 20);
+    this.maxToolCalls = positiveIntegerOption(options.maxToolCalls, process.env.OPENAI_TREND_MAX_TOOL_CALLS, 2);
+    this.maxOutputTokens = positiveIntegerOption(options.maxOutputTokens, process.env.OPENAI_TREND_MAX_OUTPUT_TOKENS, 12000);
     this.endpoint = options.endpoint ?? "https://api.openai.com/v1/responses";
     this.now = options.now ?? (() => new Date());
     this.fetchFn = options.fetchFn ?? fetch;
@@ -693,6 +693,20 @@ function openAiErrorMessage(payload: OpenAiResponsePayload, status: number): str
 function numberOption(value: number | undefined, envValue: string | undefined, fallback: number): number {
   const raw = value ?? (envValue === undefined || envValue === "" ? undefined : Number(envValue));
   return raw === undefined || Number.isNaN(raw) ? fallback : raw;
+}
+
+function positiveNumberOption(value: number | undefined, envValue: string | undefined, fallback: number): number {
+  const parsed = numberOption(value, envValue, fallback);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonNegativeNumberOption(value: number | undefined, envValue: string | undefined, fallback: number): number {
+  const parsed = numberOption(value, envValue, fallback);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function positiveIntegerOption(value: number | undefined, envValue: string | undefined, fallback: number): number {
+  return Math.floor(positiveNumberOption(value, envValue, fallback));
 }
 
 function parseGeneratedAt(value: string, fallback: Date): Date {
