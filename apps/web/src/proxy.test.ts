@@ -48,6 +48,16 @@ describe("dashboard proxy", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  it("accepts case-insensitive auth schemes", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DASHBOARD_AUTH_TOKEN", "secret");
+
+    const credentials = btoa("operator:secret");
+
+    expect(proxy(request({ authorization: "bearer secret" })).status).toBe(200);
+    expect(proxy(request({ authorization: `basic ${credentials}` })).status).toBe(200);
+  });
+
   it("accepts basic auth when the token contains colon characters", () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("DASHBOARD_AUTH_TOKEN", "secret:with:colons");

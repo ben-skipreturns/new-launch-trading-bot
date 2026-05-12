@@ -227,6 +227,12 @@ program
       }
       console.log(`Stored ${result.observations.length} trend observations and ${result.topics.length} topics.`);
       if (!options.fixture) await printLatestTrendRefreshRun(store);
+    } catch (error) {
+      if (shutdown.signal.aborted && isAbortError(error)) {
+        console.log("Trend refresh aborted.");
+        return;
+      }
+      throw error;
     } finally {
       shutdown.dispose();
       await closeStore(store);

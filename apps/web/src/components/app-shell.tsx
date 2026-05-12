@@ -15,7 +15,8 @@ const navItems: NavItem[] = [
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const refreshSeconds = process.env.NEXT_PUBLIC_REFRESH_SECONDS ?? "30";
+  const parsedRefreshSeconds = Number(process.env.NEXT_PUBLIC_REFRESH_SECONDS ?? 30);
+  const refreshSeconds = Number.isFinite(parsedRefreshSeconds) && parsedRefreshSeconds > 0 ? parsedRefreshSeconds : 30;
   return (
     <div className="shell-grid">
       <aside className="border-r border-line bg-panel/75 text-ink backdrop-blur-xl max-[980px]:border-b max-[980px]:border-r-0">

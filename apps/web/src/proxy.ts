@@ -23,13 +23,16 @@ export function proxy(request: NextRequest) {
 
 function isAuthorized(authorization: string | null, token: string): boolean {
   if (!authorization) return false;
-  if (authorization === `Bearer ${token}`) return true;
-  if (!authorization.startsWith("Basic ")) return false;
+  const separator = authorization.indexOf(" ");
+  const scheme = separator >= 0 ? authorization.slice(0, separator).toLowerCase() : "";
+  const credentials = separator >= 0 ? authorization.slice(separator + 1) : "";
+  if (scheme === "bearer") return credentials === token;
+  if (scheme !== "basic") return false;
 
   try {
-    const decoded = atob(authorization.slice("Basic ".length));
-    const separator = decoded.indexOf(":");
-    const password = separator >= 0 ? decoded.slice(separator + 1) : "";
+    const decoded = atob(credentials);
+    const credentialSeparator = decoded.indexOf(":");
+    const password = credentialSeparator >= 0 ? decoded.slice(credentialSeparator + 1) : "";
     return password === token;
   } catch {
     return false;
