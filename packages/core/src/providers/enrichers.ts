@@ -344,22 +344,27 @@ export class JupiterPriceEnricher implements Enricher {
   readonly name = "jupiter";
 
   async enrich(launch: TokenLaunch, signal?: AbortSignal): Promise<TokenEnrichment | null> {
-    const response = await fetch(`https://lite-api.jup.ag/price/v2?ids=${launch.mint}`, { signal });
+    const response = await fetch(`https://lite-api.jup.ag/price/v2?ids=${launch.mint},${SOL_MINT}`, { signal });
     if (!response.ok) return null;
     const raw = (await response.json()) as JupiterPriceResponse;
     const item = raw.data?.[launch.mint];
     if (!item) return null;
+    const priceUsd = item.price ? Number(item.price) : undefined;
+    const solPriceUsd = raw.data?.[SOL_MINT]?.price ? Number(raw.data[SOL_MINT]?.price) : undefined;
     return {
       mint: launch.mint,
       observedAt: new Date(),
       provider: this.name,
-      priceUsd: item.price ? Number(item.price) : undefined,
+      priceSol: priceUsd && solPriceUsd && solPriceUsd > 0 ? priceUsd / solPriceUsd : undefined,
+      priceUsd,
       sentimentKeywords: [],
       socialLinks: {},
       raw: raw as JsonValue
     };
   }
 }
+
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 export class BirdeyeEnricher implements Enricher {
   readonly name = "birdeye";

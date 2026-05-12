@@ -14,6 +14,7 @@ export * from "./reporting/dailyReport.js";
 export * from "./reporting/memeReport.js";
 export * from "./replay/replayRunner.js";
 export * from "./replay/livePositionSupervisor.js";
+export * from "./replay/eventProcessingPool.js";
 export * from "./replay/tradingPipeline.js";
 export * from "./storage/memoryStore.js";
 export * from "./storage/postgresStore.js";

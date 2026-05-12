@@ -111,6 +111,26 @@ interface ScoreSnapshotsTable {
   feature_snapshot: JsonValue;
 }
 
+interface LatestScoreSnapshotsTable {
+  mint: string;
+  as_of: Date;
+  graduation_probability: string;
+  risk_score: string;
+  trend_score: string;
+  expected_value_score: string;
+  decision: string;
+  reasons: string[];
+  feature_snapshot: JsonValue;
+}
+
+interface TokenLaunchStatusTable {
+  mint: string;
+  has_meme_match: boolean;
+  has_score: boolean;
+  latest_score_at: Date | null;
+  updated_at: Generated<Date>;
+}
+
 interface PaperOrdersTable {
   id: string;
   mint: string;
@@ -257,6 +277,8 @@ interface Database {
   token_enrichments: TokenEnrichmentsTable;
   feature_snapshots: FeatureSnapshotsTable;
   score_snapshots: ScoreSnapshotsTable;
+  latest_score_snapshots: LatestScoreSnapshotsTable;
+  token_launch_status: TokenLaunchStatusTable;
   paper_orders: PaperOrdersTable;
   paper_positions: PaperPositionsTable;
   exit_events: ExitEventsTable;
@@ -332,6 +354,17 @@ export class PostgresStore implements Store {
           market_cap_sol: num(launch.marketCapSol)
         })
       )
+      .execute();
+
+    await this.db
+      .insertInto("token_launch_status")
+      .values({
+        mint: launch.mint,
+        has_meme_match: false,
+        has_score: false,
+        latest_score_at: null
+      })
+      .onConflict((oc) => oc.column("mint").doNothing())
       .execute();
   }
 
@@ -423,6 +456,50 @@ export class PostgresStore implements Store {
         feature_snapshot: snapshot.features as unknown as JsonValue
       })
       .execute();
+
+    await sql`
+      insert into latest_score_snapshots (
+        mint,
+        as_of,
+        graduation_probability,
+        risk_score,
+        trend_score,
+        expected_value_score,
+        decision,
+        reasons,
+        feature_snapshot
+      )
+      values (
+        ${snapshot.mint},
+        ${snapshot.asOf},
+        ${String(snapshot.graduationProbability)},
+        ${String(snapshot.riskScore)},
+        ${String(snapshot.trendScore)},
+        ${String(snapshot.expectedValueScore)},
+        ${snapshot.decision},
+        ${snapshot.reasons},
+        ${snapshot.features as unknown as JsonValue}
+      )
+      on conflict (mint) do update set
+        as_of = excluded.as_of,
+        graduation_probability = excluded.graduation_probability,
+        risk_score = excluded.risk_score,
+        trend_score = excluded.trend_score,
+        expected_value_score = excluded.expected_value_score,
+        decision = excluded.decision,
+        reasons = excluded.reasons,
+        feature_snapshot = excluded.feature_snapshot
+      where latest_score_snapshots.as_of <= excluded.as_of
+    `.execute(this.db);
+
+    await sql`
+      insert into token_launch_status (mint, has_meme_match, has_score, latest_score_at, updated_at)
+      values (${snapshot.mint}, false, true, ${snapshot.asOf}, now())
+      on conflict (mint) do update set
+        has_score = true,
+        latest_score_at = greatest(coalesce(token_launch_status.latest_score_at, excluded.latest_score_at), excluded.latest_score_at),
+        updated_at = now()
+    `.execute(this.db);
   }
 
   async insertPaperOrder(order: PaperOrder): Promise<void> {
@@ -667,6 +744,14 @@ export class PostgresStore implements Store {
         })
       )
       .execute();
+
+    await sql`
+      insert into token_launch_status (mint, has_meme_match, has_score, latest_score_at, updated_at)
+      values (${match.mint}, true, false, null, now())
+      on conflict (mint) do update set
+        has_meme_match = true,
+        updated_at = now()
+    `.execute(this.db);
   }
 
   async insertRetentionRun(run: RetentionRun): Promise<void> {
@@ -694,6 +779,26 @@ export class PostgresStore implements Store {
     let query = this.db.selectFrom("token_launches").selectAll();
     if (options.createdAfter) query = query.where("created_at", ">=", options.createdAfter);
     query = query.orderBy("created_at", options.order ?? "asc");
+    if (typeof options.limit === "number") query = query.limit(options.limit);
+    const rows = await query.execute();
+    return rows.map(launchFromRow);
+  }
+
+  async listUnscoredTokenLaunches(options: ListTokenLaunchesOptions = {}): Promise<TokenLaunch[]> {
+    let query = this.db.selectFrom("token_launches").selectAll();
+    if (options.createdAfter) query = query.where("created_at", ">=", options.createdAfter);
+    query = query
+      .where((eb) =>
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom("score_snapshots")
+              .select("score_snapshots.id")
+              .whereRef("score_snapshots.mint", "=", "token_launches.mint")
+          )
+        )
+      )
+      .orderBy("created_at", options.order ?? "asc");
     if (typeof options.limit === "number") query = query.limit(options.limit);
     const rows = await query.execute();
     return rows.map(launchFromRow);

@@ -26,6 +26,7 @@ export interface PumpApiStreamStatusEvent {
 
 export interface PumpApiLaunchFeedOptions {
   url?: string;
+  webSocketFactory?: (url: string) => WebSocket;
   reconnect?: boolean;
   maxReconnects?: number;
   initialReconnectDelayMs?: number;
@@ -62,6 +63,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
   private readonly staleTimeoutMs: number;
   private readonly maxQueueSize: number;
   private readonly onStatus?: (event: PumpApiStreamStatusEvent) => void;
+  private readonly webSocketFactory: (url: string) => WebSocket;
 
   constructor(urlOrOptions: string | PumpApiLaunchFeedOptions = process.env.PUMPAPI_STREAM_URL ?? defaultUrl) {
     const options: PumpApiLaunchFeedOptions = typeof urlOrOptions === "string" ? { url: urlOrOptions } : urlOrOptions;
@@ -73,6 +75,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
     this.staleTimeoutMs = options.staleTimeoutMs ?? 30_000;
     this.maxQueueSize = options.maxQueueSize ?? 1_000;
     this.onStatus = options.onStatus;
+    this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
   }
 
   async *stream(signal?: AbortSignal): AsyncIterable<LaunchEvent> {
@@ -94,7 +97,7 @@ export class PumpApiLaunchFeed implements LaunchFeed {
       };
 
       try {
-        ws = new WebSocket(this.url);
+        ws = this.webSocketFactory(this.url);
         const socket = ws;
         const abort = () => socket.close();
         signal?.addEventListener("abort", abort, { once: true });

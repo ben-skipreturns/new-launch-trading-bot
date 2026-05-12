@@ -136,6 +136,16 @@ export class MemoryStore implements Store {
     return typeof options.limit === "number" ? launches.slice(0, options.limit) : launches;
   }
 
+  async listUnscoredTokenLaunches(options: ListTokenLaunchesOptions = {}): Promise<TokenLaunch[]> {
+    const direction = options.order === "desc" ? -1 : 1;
+    const scoredMints = new Set(this.scores.map((score) => score.mint));
+    const launches = [...this.launches.values()]
+      .filter((launch) => !options.createdAfter || launch.createdAt >= options.createdAfter)
+      .filter((launch) => !scoredMints.has(launch.mint))
+      .sort((a, b) => direction * (a.createdAt.getTime() - b.createdAt.getTime()));
+    return typeof options.limit === "number" ? launches.slice(0, options.limit) : launches;
+  }
+
   async listTradeEvents(mint: string, upTo?: Date): Promise<TradeEvent[]> {
     return [...this.trades.values()]
       .filter((trade) => trade.mint === mint && (!upTo || trade.occurredAt <= upTo))

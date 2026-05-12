@@ -10,9 +10,11 @@ import {
   DefaultFeatureExtractor,
   DefaultPaperBroker,
   DexScreenerEnricher,
+  EventProcessingPool,
   GeckoTerminalEnricher,
   HeuristicScorer,
   JsonlLaunchFeed,
+  JupiterPriceEnricher,
   LivePositionSupervisor,
   MemeTrendEngine,
   MemoryStore,
@@ -31,6 +33,7 @@ import {
   matcherCalibrationFixtures,
   runMatcherCalibration,
   type Enricher,
+  type EventProcessingMetrics,
   type JsonValue,
   type LaunchEvent,
   type LaunchFeed,
@@ -111,6 +114,8 @@ program
     process.env.LIVE_PROCESSING_CONCURRENCY ?? "4"
   )
   .option("--max-processing-queue <count>", "Maximum live events waiting for processors", process.env.LIVE_MAX_PROCESSING_QUEUE ?? "500")
+  .option("--catch-up-limit <count>", "Persisted unscored launches to recover before live streaming", process.env.LIVE_CATCH_UP_LIMIT ?? "250")
+  .option("--catch-up-hours <hours>", "Catch-up window for persisted unscored launches", process.env.LIVE_CATCH_UP_HOURS ?? "24")
   .option("--allow-empty-trends", "Continue live ingestion even when no active trend topics are available", false)
   .action(async (options: IngestOptions) => {
     if (options.source === "pumpapi" && !options.databaseUrl) throw new Error("DATABASE_URL is required for live pumpapi ingestion.");
@@ -136,6 +141,8 @@ program
         positionCheckMs: parsePositiveNumberOption(options.positionCheckSeconds, "--position-check-seconds") * 1000,
         processingConcurrency: parsePositiveIntegerOption(options.processingConcurrency, "--processing-concurrency"),
         maxProcessingQueue: parsePositiveIntegerOption(options.maxProcessingQueue, "--max-processing-queue"),
+        catchUpLimit: parseNonNegativeIntegerOption(options.catchUpLimit, "--catch-up-limit"),
+        catchUpHours: parsePositiveNumberOption(options.catchUpHours, "--catch-up-hours"),
         allowEmptyTrends: options.allowEmptyTrends
       });
       if (health) await finishStreamHealthRun(store, health, "completed");
@@ -191,6 +198,7 @@ program
   .option("--fixture", "Use fixture trend observations instead of live web sources", false)
   .option("--allow-empty-trends", "Exit successfully even when no active trend topics are available", false)
   .action(async (options: { databaseUrl?: string; fixture: boolean; allowEmptyTrends: boolean }) => {
+    if (!options.fixture && !options.databaseUrl) throw new Error("DATABASE_URL is required for live trend-refresh.");
     const store = createStore(options.databaseUrl);
     try {
       const result = options.fixture
@@ -373,6 +381,7 @@ program
   .option("--to <iso>", "End timestamp")
   .option("--report <path>", "Report path", "reports/meme-report.md")
   .action(async (options: { databaseUrl?: string; from?: string; to?: string; report: string }) => {
+    if (!options.databaseUrl) throw new Error("DATABASE_URL is required for meme-report.");
     const store = createStore(options.databaseUrl);
     try {
       const report = await generateMemeReport(
@@ -426,6 +435,7 @@ program
       rejectedLaunchDays: string;
       dryRun: boolean;
     }) => {
+      if (!options.databaseUrl) throw new Error("DATABASE_URL is required for retention-prune.");
       const store = createStore(options.databaseUrl);
       try {
         const result = await store.pruneRetention({
@@ -515,6 +525,8 @@ interface IngestOptions {
   maxFeedQueue: string;
   processingConcurrency: string;
   maxProcessingQueue: string;
+  catchUpLimit: string;
+  catchUpHours: string;
   allowEmptyTrends: boolean;
 }
 
@@ -654,7 +666,7 @@ async function recordStreamHealthEvent(
     if (duplicateLaunch) health.duplicateLaunches += 1;
     appendAcceptedCreateSample(health, event);
   }
-  if (health.status === "stale" || health.status === "error") health.status = "running";
+  if (health.status === "stale") health.status = "running";
   updateStreamHealthMetrics(health);
   if (store) await store.upsertStreamHealthRun(health);
 }
@@ -1072,6 +1084,12 @@ function parsePositiveIntegerOption(value: string, name: string): number {
   return parsed;
 }
 
+function parseNonNegativeIntegerOption(value: string, name: string): number {
+  const parsed = parseNumberOption(value, name);
+  if (parsed < 0 || !Number.isInteger(parsed)) throw new Error(`${name} must be a non-negative integer.`);
+  return parsed;
+}
+
 function parseReplaySourceOption(value: string, name: string): "fixture" | "live" {
   if (value === "fixture" || value === "live") return value;
   throw new Error(`${name} must be "fixture" or "live".`);
@@ -1104,13 +1122,18 @@ async function runStreaming(
 ): Promise<{ events: number }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), durationMs);
-  const stopBackgroundWork: Array<() => void> = [];
+  const stopBackgroundWork: BackgroundLoopHandle[] = [];
+  let runFailure: unknown;
+  const failRun = (error: unknown) => {
+    if (!runFailure) runFailure = error;
+    controller.abort();
+  };
   const processor = new EventProcessingPool({
     concurrency: options.processingConcurrency ?? 1,
     maxQueuedEvents: options.maxProcessingQueue ?? 100,
     onFailure: (error) => {
       console.error(`event processing failed: ${error instanceof Error ? error.message : String(error)}`);
-      controller.abort();
+      failRun(error);
     },
     onMetrics: (metrics) => updateStreamProcessingHealth(options.store, options.health, metrics)
   });
@@ -1119,7 +1142,9 @@ async function runStreaming(
       openPositionSnapshotIntervalMs: options.positionCheckMs
     });
     stopBackgroundWork.push(
-      startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, () => supervisor.captureDueSnapshots(), controller)
+      startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, () => supervisor.captureDueSnapshots(), controller, {
+        onFailure: failRun
+      })
     );
   }
   if (options.store && options.trendRefreshMs) {
@@ -1129,34 +1154,99 @@ async function runStreaming(
         options.trendRefreshMs,
         () => refreshLiveTrendsOrFail(options.store as Store, { allowEmptyTopics: options.allowEmptyTrends }),
         controller,
-        { runImmediately: false }
+        { runImmediately: false, onFailure: failRun }
       )
     );
   }
   let events = 0;
   const seenLaunches = new Set<string>();
   try {
-    for await (const event of feed.stream(controller.signal)) {
-      const duplicateLaunch = event.tokenLaunch ? await isDuplicateLaunch(options.store, seenLaunches, event.tokenLaunch) : false;
-      await recordStreamHealthEvent(options.store, options.health, event, duplicateLaunch);
-      if (options.store) {
-        await options.store.upsertRawEvent(event);
-        if (event.tokenLaunch) await options.store.upsertTokenLaunch(event.tokenLaunch);
+    if (options.store && options.catchUpLimit && options.catchUpLimit > 0) {
+      const result = await catchUpUnscoredLaunches(options.store, pipeline, {
+        limit: options.catchUpLimit,
+        since: new Date(Date.now() - (options.catchUpHours ?? 24) * 60 * 60 * 1000),
+        signal: controller.signal
+      });
+      if (result.processed > 0 || result.inspected > 0) {
+        console.log(
+          `Catch-up inspected ${result.inspected} persisted unscored launches and recovered ${result.processed} score snapshots.`
+        );
       }
-      await processor.add(event.mint ?? event.tokenLaunch?.mint ?? event.tradeEvent?.mint ?? event.signature, () =>
-        pipeline.processEvent(event, {
-          rawEventAlreadyStored: Boolean(options.store),
-          signal: controller.signal
-        })
-      );
-      events += 1;
     }
-    await processor.drain();
+
+    try {
+      for await (const event of feed.stream(controller.signal)) {
+        const duplicateLaunch = event.tokenLaunch ? await isDuplicateLaunch(options.store, seenLaunches, event.tokenLaunch) : false;
+        await recordStreamHealthEvent(options.store, options.health, event, duplicateLaunch);
+        if (options.store) {
+          await options.store.upsertRawEvent(event);
+          if (event.tokenLaunch) await options.store.upsertTokenLaunch(event.tokenLaunch);
+        }
+        await processor.add(event.mint ?? event.tokenLaunch?.mint ?? event.tradeEvent?.mint ?? event.signature, () =>
+          pipeline.processEvent(event, {
+            rawEventAlreadyStored: Boolean(options.store),
+            signal: controller.signal
+          })
+        );
+        events += 1;
+      }
+    } catch (error) {
+      failRun(error);
+    } finally {
+      await Promise.all(stopBackgroundWork.map((loop) => loop.stop().catch((error) => failRun(error))));
+      try {
+        await processor.drain();
+      } catch (error) {
+        failRun(error);
+      }
+    }
+    if (runFailure) throw runFailure;
   } finally {
     clearTimeout(timeout);
-    stopBackgroundWork.forEach((stop) => stop());
+    await Promise.all(stopBackgroundWork.map((loop) => loop.stop()));
   }
   return { events };
+}
+
+interface CatchUpResult {
+  inspected: number;
+  processed: number;
+}
+
+async function catchUpUnscoredLaunches(
+  store: Store,
+  pipeline: TradingPipeline,
+  options: { limit: number; since: Date; signal?: AbortSignal }
+): Promise<CatchUpResult> {
+  const launches = await store.listUnscoredTokenLaunches({ createdAfter: options.since, limit: options.limit, order: "asc" });
+  let processed = 0;
+  for (const launch of launches) {
+    if (options.signal?.aborted) break;
+    const event = buildCatchUpLaunchEvent(launch, new Date());
+    const score = await pipeline.processEvent(event, {
+      rawEventAlreadyStored: true,
+      signal: options.signal
+    });
+    if (score) processed += 1;
+  }
+  return { inspected: launches.length, processed };
+}
+
+function buildCatchUpLaunchEvent(launch: TokenLaunch, observedAt: Date): LaunchEvent {
+  return {
+    eventType: "create",
+    source: launch.source,
+    signature: `catch-up:${launch.signature}`,
+    mint: launch.mint,
+    pool: launch.pool,
+    timestamp: observedAt,
+    tokenLaunch: launch,
+    raw: {
+      catchUp: true,
+      originalSignature: launch.signature,
+      launchCreatedAt: launch.createdAt.toISOString()
+    }
+  };
 }
 
 interface LiveStreamingOptions {
@@ -1167,117 +1257,8 @@ interface LiveStreamingOptions {
   processingConcurrency?: number;
   maxProcessingQueue?: number;
   allowEmptyTrends?: boolean;
-}
-
-interface EventProcessingMetrics {
-  active: number;
-  queued: number;
-  concurrency: number;
-  maxQueuedEvents: number;
-  oldestQueuedMs: number;
-}
-
-interface QueuedEventTask {
-  key: string;
-  enqueuedAt: number;
-  run: () => Promise<unknown>;
-}
-
-class EventProcessingPool {
-  private readonly concurrency: number;
-  private readonly maxQueuedEvents: number;
-  private readonly onFailure?: (error: unknown) => void;
-  private readonly onMetrics?: (metrics: EventProcessingMetrics) => void;
-  private readonly pending: QueuedEventTask[] = [];
-  private readonly activeKeys = new Set<string>();
-  private readonly capacityWaiters: Array<() => void> = [];
-  private readonly idleWaiters: Array<() => void> = [];
-  private active = 0;
-  private failure: unknown;
-
-  constructor(options: {
-    concurrency: number;
-    maxQueuedEvents: number;
-    onFailure?: (error: unknown) => void;
-    onMetrics?: (metrics: EventProcessingMetrics) => void;
-  }) {
-    this.concurrency = Math.max(1, options.concurrency);
-    this.maxQueuedEvents = Math.max(1, options.maxQueuedEvents);
-    this.onFailure = options.onFailure;
-    this.onMetrics = options.onMetrics;
-  }
-
-  async add(key: string, run: () => Promise<unknown>): Promise<void> {
-    this.throwIfFailed();
-    while (this.pending.length >= this.maxQueuedEvents) {
-      await new Promise<void>((resolve) => this.capacityWaiters.push(resolve));
-      this.throwIfFailed();
-    }
-    this.pending.push({ key, run, enqueuedAt: Date.now() });
-    this.emitMetrics();
-    this.pump();
-  }
-
-  async drain(): Promise<void> {
-    while (this.pending.length > 0 || this.active > 0) {
-      this.throwIfFailed();
-      await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
-      this.throwIfFailed();
-    }
-    this.throwIfFailed();
-  }
-
-  private pump(): void {
-    while (this.active < this.concurrency) {
-      const index = this.pending.findIndex((task) => !this.activeKeys.has(task.key));
-      if (index < 0) break;
-      const [task] = this.pending.splice(index, 1);
-      this.active += 1;
-      this.activeKeys.add(task.key);
-      this.emitMetrics();
-      void Promise.resolve()
-        .then(task.run)
-        .catch((error) => {
-          if (!this.failure) {
-            this.failure = error;
-            this.onFailure?.(error);
-          }
-        })
-        .finally(() => {
-          this.active -= 1;
-          this.activeKeys.delete(task.key);
-          if (this.failure) this.pending.splice(0);
-          this.resolveCapacityWaiters();
-          this.emitMetrics();
-          if (!this.failure) this.pump();
-          this.resolveIdleWaitersIfIdle();
-        });
-    }
-  }
-
-  private throwIfFailed(): void {
-    if (this.failure) throw this.failure;
-  }
-
-  private resolveCapacityWaiters(): void {
-    this.capacityWaiters.splice(0).forEach((resolve) => resolve());
-  }
-
-  private resolveIdleWaitersIfIdle(): void {
-    if (this.pending.length > 0 || this.active > 0) return;
-    this.idleWaiters.splice(0).forEach((resolve) => resolve());
-  }
-
-  private emitMetrics(): void {
-    const oldestQueuedMs = this.pending.length > 0 ? Date.now() - Math.min(...this.pending.map((task) => task.enqueuedAt)) : 0;
-    this.onMetrics?.({
-      active: this.active,
-      queued: this.pending.length,
-      concurrency: this.concurrency,
-      maxQueuedEvents: this.maxQueuedEvents,
-      oldestQueuedMs
-    });
-  }
+  catchUpLimit?: number;
+  catchUpHours?: number;
 }
 
 function updateStreamProcessingHealth(store: Store | undefined, health: StreamHealthRun | undefined, metrics: EventProcessingMetrics): void {
@@ -1296,29 +1277,42 @@ function updateStreamProcessingHealth(store: Store | undefined, health: StreamHe
   if (store) void store.upsertStreamHealthRun(health).catch(() => undefined);
 }
 
+interface BackgroundLoopHandle {
+  stop(): Promise<void>;
+}
+
 function startBackgroundLoop(
   name: string,
   intervalMs: number,
   task: () => Promise<unknown>,
   controller: AbortController,
-  options: { runImmediately?: boolean } = {}
-): () => void {
-  let running = false;
-  const run = async () => {
-    if (running || controller.signal.aborted) return;
-    running = true;
-    try {
-      await task();
-    } catch (error) {
-      console.error(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
-      controller.abort();
-    } finally {
-      running = false;
-    }
+  options: { runImmediately?: boolean; onFailure?: (error: unknown) => void } = {}
+): BackgroundLoopHandle {
+  let stopped = false;
+  let running: Promise<void> | undefined;
+  const run = () => {
+    if (running || stopped || controller.signal.aborted) return;
+    running = (async () => {
+      try {
+        await task();
+      } catch (error) {
+        console.error(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+        options.onFailure?.(error);
+        controller.abort();
+      } finally {
+        running = undefined;
+      }
+    })();
   };
   const timer = setInterval(() => void run(), intervalMs);
   if (options.runImmediately ?? true) void run();
-  return () => clearInterval(timer);
+  return {
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    }
+  };
 }
 
 function createPipeline(store: Store, enricher: Enricher): TradingPipeline {
@@ -1344,7 +1338,8 @@ async function applyMigrations(store: PostgresStore): Promise<void> {
   const files = [
     "migrations/001_initial_schema.sql",
     "migrations/002_launch_readiness_indexes.sql",
-    "migrations/003_live_launch_hardening.sql"
+    "migrations/003_live_launch_hardening.sql",
+    "migrations/004_latest_launch_state.sql"
   ];
   for (const file of files) {
     const sql = await readFile(file, "utf8");
@@ -1385,9 +1380,12 @@ async function printLatestTrendRefreshRun(store: Store): Promise<void> {
 }
 
 function liveEnricher(): Enricher {
-  return new CompositeEnricher([new TokenMetadataEnricher(), new DexScreenerEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()], {
-    perProviderTimeoutMs: numberEnv("LIVE_ENRICHER_TIMEOUT_MS", 3000)
-  });
+  return new CompositeEnricher(
+    [new TokenMetadataEnricher(), new DexScreenerEnricher(), new JupiterPriceEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()],
+    {
+      perProviderTimeoutMs: numberEnv("LIVE_ENRICHER_TIMEOUT_MS", 3000)
+    }
+  );
 }
 
 function liveTrendSources(store: Store): TrendSource[] {

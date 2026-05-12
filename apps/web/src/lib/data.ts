@@ -179,13 +179,7 @@ export async function getMatcherCalibrationReport(): Promise<DataState<MatcherCa
          metadata_failure.raw as metadata_failure_raw
        from token_meme_matches m
        join token_launches tl on tl.mint = m.mint
-       left join lateral (
-         select decision, expected_value_score
-         from score_snapshots s
-         where s.mint = m.mint
-         order by s.as_of desc
-         limit 1
-       ) latest_score on true
+       left join latest_score_snapshots latest_score on latest_score.mint = m.mint
        left join lateral (
          select raw
          from token_enrichments e
@@ -222,27 +216,22 @@ async function safeRead<T>(fallback: T, read: () => Promise<T>): Promise<DataSta
 
 async function getLaunches(limit = 50): Promise<LaunchListItem[]> {
   const rows = await query<LaunchRow>(
-    `with latest_scores as (
-       select distinct on (s.mint)
-         s.mint,
-         tl.name,
-         tl.symbol,
-         tl.created_at,
-         s.as_of,
-         s.graduation_probability,
-         s.risk_score,
-         s.trend_score,
-         s.expected_value_score,
-         s.decision,
-         s.reasons,
-         s.feature_snapshot
-       from score_snapshots s
-       left join token_launches tl on tl.mint = s.mint
-       order by s.mint, s.as_of desc
-     )
-     select *
-     from latest_scores
-     order by as_of desc
+    `select
+       s.mint,
+       tl.name,
+       tl.symbol,
+       tl.created_at,
+       s.as_of,
+       s.graduation_probability,
+       s.risk_score,
+       s.trend_score,
+       s.expected_value_score,
+       s.decision,
+       s.reasons,
+       s.feature_snapshot
+     from latest_score_snapshots s
+     left join token_launches tl on tl.mint = s.mint
+     order by s.as_of desc
      limit $1`,
     [limit]
   );
@@ -269,13 +258,7 @@ async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined
        latest_match.canonical_phrase,
        latest_match.topic_type
      from token_launches tl
-     left join lateral (
-       select *
-       from score_snapshots s
-       where s.mint = tl.mint
-       order by s.as_of desc
-       limit 1
-     ) latest_score on true
+     left join latest_score_snapshots latest_score on latest_score.mint = tl.mint
      left join lateral (
        select *
        from token_meme_matches m
@@ -293,12 +276,10 @@ async function getLaunchByMint(mint: string): Promise<LaunchListItem | undefined
 async function getRawLaunches(page: number, pageSize: number, filters: RawLaunchFilters): Promise<RawLaunchPage> {
   const offset = (page - 1) * pageSize;
   const where = buildRawLaunchWhere(filters);
-  const statusCte = rawLaunchStatusCte();
-  const statusJoins = rawLaunchStatusJoins();
+  const statusJoin = rawLaunchStatusJoin();
   const [rows, statsRows, sourceRows, streamHealth] = await Promise.all([
     query<RawLaunchRow>(
-      `${statusCte}
-       select
+      `select
          tl.mint,
          tl.source,
          tl.signature,
@@ -313,25 +294,24 @@ async function getRawLaunches(page: number, pageSize: number, filters: RawLaunch
          tl.initial_buy_sol,
          tl.v_sol_in_bonding_curve,
          tl.market_cap_sol,
-         (mm.mint is not null) as has_meme_match,
-         (ss.mint is not null) as has_score
+         coalesce(st.has_meme_match, false) as has_meme_match,
+         coalesce(st.has_score, false) as has_score
        from token_launches tl
-       ${statusJoins}
+       ${statusJoin}
        ${where.sql}
        order by tl.created_at desc
        limit $${where.params.length + 1} offset $${where.params.length + 2}`,
       [...where.params, pageSize, offset]
     ),
     query<RawLaunchStatsRow>(
-      `${statusCte}
-       select
+      `select
          count(*)::text as total_count,
-         count(*) filter (where mm.mint is null and ss.mint is null)::text as raw_only_count,
-         count(*) filter (where mm.mint is not null)::text as matched_count,
-         count(*) filter (where ss.mint is not null)::text as scored_count,
+         count(*) filter (where coalesce(st.has_meme_match, false) = false and coalesce(st.has_score, false) = false)::text as raw_only_count,
+         count(*) filter (where coalesce(st.has_meme_match, false) = true)::text as matched_count,
+         count(*) filter (where coalesce(st.has_score, false) = true)::text as scored_count,
          max(created_at) as latest_created_at
        from token_launches tl
-       ${statusJoins}
+       ${statusJoin}
        ${where.sql}`,
       where.params
     ),
@@ -374,29 +354,19 @@ function buildRawLaunchWhere(filters: RawLaunchFilters): { sql: string; params: 
     clauses.push(`tl.created_at >= $${params.length}`);
   }
   if (filters.status === "raw") {
-    clauses.push("mm.mint is null");
-    clauses.push("ss.mint is null");
+    clauses.push("coalesce(st.has_meme_match, false) = false");
+    clauses.push("coalesce(st.has_score, false) = false");
   }
-  if (filters.status === "matched") clauses.push("mm.mint is not null");
-  if (filters.status === "scored") clauses.push("ss.mint is not null");
+  if (filters.status === "matched") clauses.push("coalesce(st.has_meme_match, false) = true");
+  if (filters.status === "scored") clauses.push("coalesce(st.has_score, false) = true");
   return {
     sql: clauses.length > 0 ? `where ${clauses.join(" and ")}` : "",
     params
   };
 }
 
-function rawLaunchStatusCte(): string {
-  return `with matched_mints as (
-        select distinct mint from token_meme_matches
-      ),
-      scored_mints as (
-        select distinct mint from score_snapshots
-      )`;
-}
-
-function rawLaunchStatusJoins(): string {
-  return `left join matched_mints mm on mm.mint = tl.mint
-       left join scored_mints ss on ss.mint = tl.mint`;
+function rawLaunchStatusJoin(): string {
+  return "left join token_launch_status st on st.mint = tl.mint";
 }
 
 function isRawLaunchStatusFilter(value: unknown): value is RawLaunchStatusFilter {
@@ -418,13 +388,7 @@ async function getPositions(limit = 50): Promise<PositionListItem[]> {
        latest.feature_snapshot
      from paper_positions p
      left join token_launches tl on tl.mint = p.mint
-     left join lateral (
-       select feature_snapshot
-       from score_snapshots s
-       where s.mint = p.mint
-       order by s.as_of desc
-       limit 1
-     ) latest on true
+     left join latest_score_snapshots latest on latest.mint = p.mint
      order by p.opened_at desc
      limit $1`,
     [limit]
@@ -485,7 +449,7 @@ async function getDecisionRawCounts(): Promise<DecisionRawCounts> {
   const rows = await query<DecisionRawCountsRow>(
     `select
        (select count(*)::text from token_launches) as total_launches,
-       (select count(distinct mint)::text from token_meme_matches) as meme_matched_launches,
+       (select count(*)::text from token_launch_status where has_meme_match = true) as meme_matched_launches,
        (select count(*)::text from exit_events) as exit_events`
   );
   const row = rows[0];
@@ -521,7 +485,7 @@ async function getHealth(): Promise<DashboardSummary["health"]> {
   }>(
     `select
        (select max(observed_at) from raw_events) as latest_raw_event_at,
-       (select max(as_of) from score_snapshots) as latest_score_at,
+       (select max(as_of) from latest_score_snapshots) as latest_score_at,
        (select max(observed_at) from trend_observations) as latest_trend_observation_at`
   );
   const row = rows[0];

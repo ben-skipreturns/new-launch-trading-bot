@@ -43,6 +43,7 @@ export interface Store {
 
   getTokenLaunch(mint: string): Promise<TokenLaunch | undefined>;
   listTokenLaunches(options?: ListTokenLaunchesOptions): Promise<TokenLaunch[]>;
+  listUnscoredTokenLaunches(options?: ListTokenLaunchesOptions): Promise<TokenLaunch[]>;
   listTradeEvents(mint: string, upTo?: Date): Promise<TradeEvent[]>;
   getLatestEnrichment(mint: string, upTo?: Date): Promise<TokenEnrichment | undefined>;
   getOpenPosition(mint: string): Promise<PaperPosition | undefined>;
