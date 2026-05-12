@@ -9,11 +9,16 @@ const OPENAI_MEME_RADAR_SOURCE = "openai-meme-radar";
 export class MemeTrendEngine {
   constructor(
     private readonly store: Store,
-    private readonly sources: TrendSource[]
+    private readonly sources: TrendSource[],
+    private readonly options: MemeTrendEngineOptions = {}
   ) {}
 
   async refresh(signal?: AbortSignal): Promise<{ observations: TrendObservation[]; topics: TrendTopic[] }> {
-    const sourceObservations = (await Promise.all(this.sources.map((source) => safeFetch(source, signal)))).flat();
+    const results = await Promise.all(this.sources.map((source) => safeFetch(source, signal)));
+    if (this.options.failOnAllSourcesError && results.length > 0 && results.every((result) => result.error)) {
+      throw new Error(`All trend sources failed: ${results.map((result) => `${result.source}: ${result.error}`).join("; ")}`);
+    }
+    const sourceObservations = results.flatMap((result) => result.observations);
     const observations = expandTrendObservations(sourceObservations);
     const topics = buildTrendTopics(observations);
     for (const topic of topics) {
@@ -24,6 +29,10 @@ export class MemeTrendEngine {
     }
     return { observations, topics };
   }
+}
+
+export interface MemeTrendEngineOptions {
+  failOnAllSourcesError?: boolean;
 }
 
 export function buildTrendTopics(observations: TrendObservation[]): TrendTopic[] {
@@ -712,11 +721,14 @@ function compactJsonObject(values: Record<string, JsonValue | undefined>): JsonO
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined)) as JsonObject;
 }
 
-async function safeFetch(source: TrendSource, signal?: AbortSignal): Promise<TrendObservation[]> {
+async function safeFetch(
+  source: TrendSource,
+  signal?: AbortSignal
+): Promise<{ source: string; observations: TrendObservation[]; error?: string }> {
   try {
-    return await source.fetchObservations(signal);
-  } catch {
-    return [];
+    return { source: source.name, observations: await source.fetchObservations(signal) };
+  } catch (error) {
+    return { source: source.name, observations: [], error: error instanceof Error ? error.message : String(error) };
   }
 }
 

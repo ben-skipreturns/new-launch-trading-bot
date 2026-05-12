@@ -13,6 +13,7 @@ import {
   GeckoTerminalEnricher,
   HeuristicScorer,
   JsonlLaunchFeed,
+  LivePositionSupervisor,
   MemeTrendEngine,
   MemoryStore,
   OpenAiMemeTrendSource,
@@ -76,7 +77,8 @@ program
   .action(async (options: { fixture: string; report: string; databaseUrl?: string }) => {
     const store = createStore(options.databaseUrl);
     try {
-      await refreshTrends(store, options.fixture.includes("fixture") ? fixtureTrendSources() : liveTrendSources(store));
+      if (options.fixture.includes("fixture")) await refreshTrends(store, fixtureTrendSources());
+      else await refreshLiveTrendsOrFail(store);
       const result = await runReplay(options.fixture, store, options.fixture.includes("fixture") ? fixtureEnricher() : liveEnricher());
       const report = await generateDailyReport(store);
       await writeText(options.report, report);
@@ -94,7 +96,10 @@ program
   .option("--fixture <path>", "JSONL fixture path", "fixtures/pumpapi-events.jsonl")
   .option("--duration-seconds <seconds>", "Stop live ingestion after this many seconds", "60")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
-  .action(async (options: { source: string; fixture: string; durationSeconds: string; databaseUrl?: string }) => {
+  .option("--trend-refresh-minutes <minutes>", "Refresh live trend topics while streaming", process.env.OPENAI_TREND_REFRESH_MINUTES ?? "15")
+  .option("--position-check-seconds <seconds>", "Capture age/open-position snapshots while streaming", "30")
+  .option("--allow-empty-trends", "Continue live ingestion even when no active trend topics are available", false)
+  .action(async (options: IngestOptions) => {
     const store = createStore(options.databaseUrl);
     try {
       if (options.source === "fixture") {
@@ -104,11 +109,16 @@ program
         return;
       }
 
-      await refreshTrends(store, liveTrendSources(store));
+      await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
       const feed = new PumpApiLaunchFeed();
       const pipeline = createPipeline(store, liveEnricher());
       const durationMs = Number(options.durationSeconds) * 1000;
-      const result = await runStreaming(feed, pipeline, durationMs);
+      const result = await runStreaming(feed, pipeline, durationMs, {
+        store,
+        trendRefreshMs: parsePositiveNumberOption(options.trendRefreshMinutes, "--trend-refresh-minutes") * 60 * 1000,
+        positionCheckMs: parsePositiveNumberOption(options.positionCheckSeconds, "--position-check-seconds") * 1000,
+        allowEmptyTrends: options.allowEmptyTrends
+      });
       console.log(`Processed ${result.events} live events.`);
     } finally {
       await closeStore(store);
@@ -155,10 +165,13 @@ program
   .description("Run the OpenAI meme trend radar and store active meme/current-event topics.")
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--fixture", "Use fixture trend observations instead of live web sources", false)
-  .action(async (options: { databaseUrl?: string; fixture: boolean }) => {
+  .option("--allow-empty-trends", "Exit successfully even when no active trend topics are available", false)
+  .action(async (options: { databaseUrl?: string; fixture: boolean; allowEmptyTrends: boolean }) => {
     const store = createStore(options.databaseUrl);
     try {
-      const result = await refreshTrends(store, options.fixture ? fixtureTrendSources() : liveTrendSources(store));
+      const result = options.fixture
+        ? await refreshTrends(store, fixtureTrendSources())
+        : await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
       console.log(`Stored ${result.observations.length} trend observations and ${result.topics.length} topics.`);
       if (!options.fixture) await printLatestTrendRefreshRun(store);
     } finally {
@@ -303,6 +316,7 @@ program
   .option("--database-url <url>", "Postgres connection string", process.env.DATABASE_URL)
   .option("--fixture-topics", "Use bundled fixture topics instead of active database topics", false)
   .option("--refresh-trends", "Refresh trend topics at startup before matching", false)
+  .option("--allow-empty-trends", "Continue matching even when no active trend topics are available", false)
   .option("--dry-run", "Print match results without writing raw events, launches, enrichments, or matches", false)
   .option("--skip-metadata", "Skip token URI metadata fetching before matching", false)
   .option("--metadata-timeout-ms <milliseconds>", "Per-token metadata fetch timeout", "2500")
@@ -467,6 +481,16 @@ interface MatchTokenOptions {
   minScore: string;
 }
 
+interface IngestOptions {
+  source: string;
+  fixture: string;
+  durationSeconds: string;
+  databaseUrl?: string;
+  trendRefreshMinutes: string;
+  positionCheckSeconds: string;
+  allowEmptyTrends: boolean;
+}
+
 interface MatchLaunchesOptions {
   databaseUrl?: string;
   limit: string;
@@ -489,6 +513,7 @@ interface MatchStreamOptions {
   databaseUrl?: string;
   fixtureTopics: boolean;
   refreshTrends: boolean;
+  allowEmptyTrends: boolean;
   dryRun: boolean;
   skipMetadata: boolean;
   metadataTimeoutMs: string;
@@ -755,7 +780,7 @@ async function runMatchStream(
   if (options.fixtureTopics) {
     await refreshTrends(topicStore, fixtureTrendSources());
   } else if (options.refreshTrends) {
-    await refreshTrends(store, liveTrendSources(store));
+    await refreshLiveTrendsOrFail(store, { allowEmptyTopics: options.allowEmptyTrends });
   }
   const topics = await listTopicsForMatching(topicStore, options.fixtureTopics, observedAt);
   const matcher = createTokenMemeMatcher(parseNumberOption(options.minScore, "--min-score"), options.fixtureTopics);
@@ -1022,9 +1047,34 @@ async function runReplay(fixturePath: string, store: Store, enricher: Enricher) 
   return new ReplayRunner(feed, pipeline).run();
 }
 
-async function runStreaming(feed: LaunchFeed, pipeline: TradingPipeline, durationMs: number): Promise<{ events: number }> {
+async function runStreaming(
+  feed: LaunchFeed,
+  pipeline: TradingPipeline,
+  durationMs: number,
+  options: LiveStreamingOptions = {}
+): Promise<{ events: number }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), durationMs);
+  const stopBackgroundWork: Array<() => void> = [];
+  if (options.store) {
+    const supervisor = new LivePositionSupervisor(options.store, pipeline, {
+      openPositionSnapshotIntervalMs: options.positionCheckMs
+    });
+    stopBackgroundWork.push(
+      startBackgroundLoop("position-supervisor", options.positionCheckMs ?? 30_000, () => supervisor.captureDueSnapshots(), controller)
+    );
+  }
+  if (options.store && options.trendRefreshMs) {
+    stopBackgroundWork.push(
+      startBackgroundLoop(
+        "trend-refresh",
+        options.trendRefreshMs,
+        () => refreshLiveTrendsOrFail(options.store as Store, { allowEmptyTopics: options.allowEmptyTrends }),
+        controller,
+        { runImmediately: false }
+      )
+    );
+  }
   let events = 0;
   try {
     for await (const event of feed.stream(controller.signal)) {
@@ -1033,8 +1083,41 @@ async function runStreaming(feed: LaunchFeed, pipeline: TradingPipeline, duratio
     }
   } finally {
     clearTimeout(timeout);
+    stopBackgroundWork.forEach((stop) => stop());
   }
   return { events };
+}
+
+interface LiveStreamingOptions {
+  store?: Store;
+  trendRefreshMs?: number;
+  positionCheckMs?: number;
+  allowEmptyTrends?: boolean;
+}
+
+function startBackgroundLoop(
+  name: string,
+  intervalMs: number,
+  task: () => Promise<unknown>,
+  controller: AbortController,
+  options: { runImmediately?: boolean } = {}
+): () => void {
+  let running = false;
+  const run = async () => {
+    if (running || controller.signal.aborted) return;
+    running = true;
+    try {
+      await task();
+    } catch (error) {
+      console.error(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+      controller.abort();
+    } finally {
+      running = false;
+    }
+  };
+  const timer = setInterval(() => void run(), intervalMs);
+  if (options.runImmediately ?? true) void run();
+  return () => clearInterval(timer);
 }
 
 function createPipeline(store: Store, enricher: Enricher): TradingPipeline {
@@ -1057,7 +1140,7 @@ async function closeStore(store: Store): Promise<void> {
 }
 
 async function applyMigrations(store: PostgresStore): Promise<void> {
-  const files = ["migrations/001_initial_schema.sql"];
+  const files = ["migrations/001_initial_schema.sql", "migrations/002_launch_readiness_indexes.sql"];
   for (const file of files) {
     const sql = await readFile(file, "utf8");
     await store.runMigration(sql);
@@ -1073,6 +1156,20 @@ async function refreshTrends(store: Store, sources: TrendSource[]) {
   return new MemeTrendEngine(store, sources).refresh();
 }
 
+async function refreshLiveTrendsOrFail(store: Store, options: { allowEmptyTopics?: boolean } = {}) {
+  const result = await new MemeTrendEngine(store, liveTrendSources(store), { failOnAllSourcesError: true }).refresh();
+  if (!options.allowEmptyTopics) await assertActiveTrendTopics(store);
+  return result;
+}
+
+async function assertActiveTrendTopics(store: Store): Promise<void> {
+  const activeSince = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  const topics = await store.listTrendTopics(activeSince, 1);
+  if (topics.length === 0) {
+    throw new Error("No active trend topics are available; refusing to continue live mode without --allow-empty-trends.");
+  }
+}
+
 async function printLatestTrendRefreshRun(store: Store): Promise<void> {
   const [run] = await store.listTrendRefreshRuns();
   if (!run) return;
@@ -1083,11 +1180,20 @@ async function printLatestTrendRefreshRun(store: Store): Promise<void> {
 }
 
 function liveEnricher(): Enricher {
-  return new CompositeEnricher([new TokenMetadataEnricher(), new DexScreenerEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()]);
+  return new CompositeEnricher([new TokenMetadataEnricher(), new DexScreenerEnricher(), new GeckoTerminalEnricher(), new BirdeyeEnricher()], {
+    perProviderTimeoutMs: numberEnv("LIVE_ENRICHER_TIMEOUT_MS", 3000)
+  });
 }
 
 function liveTrendSources(store: Store): TrendSource[] {
   return [new OpenAiMemeTrendSource({ store })];
+}
+
+function numberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function fixtureTrendSources(): TrendSource[] {

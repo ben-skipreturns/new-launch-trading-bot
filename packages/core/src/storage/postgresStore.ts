@@ -395,6 +395,18 @@ export class PostgresStore implements Store {
       .execute();
   }
 
+  async hasFeatureSnapshot(mint: string, triggerType: FeatureSnapshot["triggerType"], triggerValue: string, asOf: Date): Promise<boolean> {
+    const row = await this.db
+      .selectFrom("feature_snapshots")
+      .select((eb) => eb.fn.count<number>("id").as("count"))
+      .where("mint", "=", mint)
+      .where("trigger_type", "=", triggerType)
+      .where("trigger_value", "=", triggerValue)
+      .where("as_of", "=", asOf)
+      .executeTakeFirst();
+    return Number(row?.count ?? 0) > 0;
+  }
+
   async insertScoreSnapshot(snapshot: ScoreSnapshot): Promise<void> {
     await this.db
       .insertInto("score_snapshots")

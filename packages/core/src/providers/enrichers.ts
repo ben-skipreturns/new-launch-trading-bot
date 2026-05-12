@@ -2,18 +2,29 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { Enricher } from "../domain/interfaces.js";
 import type { JsonValue, TokenEnrichment, TokenLaunch } from "../domain/types.js";
-import { clamp } from "../utils/math.js";
 
 export class CompositeEnricher implements Enricher {
   readonly name = "composite";
+  private readonly perProviderTimeoutMs: number;
 
-  constructor(private readonly enrichers: Enricher[]) {}
+  constructor(
+    private readonly enrichers: Enricher[],
+    options: CompositeEnricherOptions = {}
+  ) {
+    this.perProviderTimeoutMs = options.perProviderTimeoutMs ?? 3000;
+  }
 
   async enrich(launch: TokenLaunch, signal?: AbortSignal): Promise<TokenEnrichment | null> {
-    const results = (await Promise.all(this.enrichers.map((enricher) => safeEnrich(enricher, launch, signal)))).filter(Boolean);
+    const results = (
+      await Promise.all(this.enrichers.map((enricher) => safeEnrichWithTimeout(enricher, launch, this.perProviderTimeoutMs, signal)))
+    ).filter(Boolean);
     if (results.length === 0) return null;
     return mergeEnrichments(launch.mint, results as TokenEnrichment[]);
   }
+}
+
+export interface CompositeEnricherOptions {
+  perProviderTimeoutMs?: number;
 }
 
 export class StaticFixtureEnricher implements Enricher {
@@ -375,10 +386,15 @@ export class BirdeyeEnricher implements Enricher {
       provider: this.name,
       holderCount: raw.data?.total,
       topHolderShare,
-      devHoldingShare: clamp(topHolderShare ?? 0, 0, 1),
       sentimentKeywords: [],
       socialLinks: {},
-      raw: raw as JsonValue
+      raw: {
+        ...raw,
+        derived: {
+          topHolderShareBasis: "share of returned holder rows",
+          devHoldingShare: "not_inferred_from_top_holder"
+        }
+      } as JsonValue
     };
   }
 }
@@ -410,6 +426,26 @@ async function safeEnrich(enricher: Enricher, launch: TokenLaunch, signal?: Abor
     return await enricher.enrich(launch, signal);
   } catch {
     return null;
+  }
+}
+
+async function safeEnrichWithTimeout(
+  enricher: Enricher,
+  launch: TokenLaunch,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<TokenEnrichment | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromParent = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", abortFromParent, { once: true });
+
+  try {
+    return await safeEnrich(enricher, launch, controller.signal);
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortFromParent);
   }
 }
 

@@ -260,6 +260,16 @@ export class MemoryStore implements Store {
     };
   }
 
+  async hasFeatureSnapshot(mint: string, triggerType: FeatureSnapshot["triggerType"], triggerValue: string, asOf: Date): Promise<boolean> {
+    return this.features.some(
+      (snapshot) =>
+        snapshot.mint === mint &&
+        snapshot.triggerType === triggerType &&
+        snapshot.triggerValue === triggerValue &&
+        snapshot.asOf.getTime() === asOf.getTime()
+    );
+  }
+
   private expiredLaunchMints(options: RetentionPruneOptions): string[] {
     const rawLaunchCutoff = options.now.getTime() - (options.rawLaunchRetentionHours ?? 48) * 60 * 60 * 1000;
     const matchedLaunchCutoff = options.now.getTime() - (options.matchedLaunchRetentionDays ?? 7) * 24 * 60 * 60 * 1000;

@@ -7,11 +7,11 @@ This is experimental research software for extremely speculative assets. It does
 ## What Is Implemented
 
 - PumpApi-compatible event normalization for `create`, `buy`, `sell`, `migration`, and `pool_created`.
-- Replayable JSONL launch feed plus live WebSocket feed scaffolding.
+- Replayable JSONL launch feed plus supervised live WebSocket ingestion.
 - Provider enrichers for DEX Screener, GeckoTerminal, Jupiter price data, and Birdeye holder data.
 - OpenAI meme trend radar with web search, budget tracking, an expanded historical case-study corpus, and deterministic token matching.
 - Next.js read-only command center for bot health, meme topics, launch decisions, positions, exits, and simulated PnL.
-- Time-consistent feature extraction at event, age, and bonding-curve milestones.
+- Time-consistent feature extraction at event, age, open-position, and bonding-curve milestones.
 - Heuristic scorer with graduation probability, risk score, trend score, expected value score, decision, and reason codes.
 - Paper broker with 0.05 SOL entries, max 10 positions, 1 SOL daily cap, fees/slippage, moonshot-skewed 5x/15x/50x exits, a retained moonbag, stop loss, timeout, and trailing stop.
 - Postgres schema and Kysely-backed store, plus in-memory demo mode.
@@ -53,6 +53,8 @@ Optional provider keys:
 
 The live path still only paper trades. `DisabledExecutionAdapter` throws if live execution is attempted.
 
+Live ingest refreshes trends on `OPENAI_TREND_REFRESH_MINUTES`, captures due age snapshots, and checks open paper positions on `--position-check-seconds` so exits are not dependent on a later stream event. By default, live mode refuses to continue if no active trend topics are available; use `--allow-empty-trends` only for diagnostics.
+
 ## Project Layout
 
 - `packages/core`: domain contracts, normalizers, providers, features, scoring, paper broker, stores, reports.
@@ -75,7 +77,7 @@ The live path still only paper trades. `DisabledExecutionAdapter` throws if live
 
 ## Command Center
 
-The web app lives at `apps/web` and is intentionally read-only in v1. It uses `DATABASE_URL` to query the existing Postgres schema and shows an error panel if the database is unavailable instead of crashing the shell.
+The web app lives at `apps/web` and is intentionally read-only in v1. It uses `DATABASE_URL` to query the existing Postgres schema and shows an error panel if the database is unavailable instead of crashing the shell. Set `DASHBOARD_AUTH_TOKEN` before exposing it outside local development; the middleware accepts either `Authorization: Bearer <token>` or HTTP Basic auth with the token as the password.
 
 ```bash
 docker compose up -d db
@@ -123,6 +125,8 @@ OPENAI_TREND_ESTIMATED_REFRESH_COST_USD=0.10
 OPENAI_TREND_MAX_TOPICS=20
 OPENAI_TREND_MAX_TOOL_CALLS=2
 OPENAI_TREND_MAX_OUTPUT_TOKENS=12000
+LIVE_ENRICHER_TIMEOUT_MS=3000
+DASHBOARD_AUTH_TOKEN=
 ```
 
 Generate a meme report:

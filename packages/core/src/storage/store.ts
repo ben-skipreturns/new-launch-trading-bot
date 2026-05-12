@@ -52,4 +52,5 @@ export interface Store {
   getLatestTokenMemeMatch(mint: string, upTo?: Date): Promise<TokenMemeMatch | undefined>;
   listTokenMemeMatches(from?: Date, to?: Date): Promise<TokenMemeMatch[]>;
   pruneRetention(options: RetentionPruneOptions): Promise<RetentionPruneResult>;
+  hasFeatureSnapshot(mint: string, triggerType: FeatureSnapshot["triggerType"], triggerValue: string, asOf: Date): Promise<boolean>;
 }

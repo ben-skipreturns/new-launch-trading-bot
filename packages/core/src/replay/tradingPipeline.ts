@@ -75,6 +75,7 @@ export class TradingPipeline {
         : `${mint}:${triggerType}:${triggerValue}:${asOf.toISOString()}`;
     if (this.captured.has(key)) return null;
     this.captured.add(key);
+    if (await this.store.hasFeatureSnapshot(mint, triggerType, triggerValue, asOf)) return null;
 
     const launch = await this.store.getTokenLaunch(mint);
     if (!launch) return null;

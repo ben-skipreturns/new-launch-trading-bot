@@ -7,8 +7,9 @@ export function calculateDashboardMetrics(input: {
   filledSells: number;
   activeTopics: number;
 }): DashboardMetrics {
-  const realizedPnlSol = input.positions.reduce((total, position) => total + position.solRealized - position.solInvested, 0);
+  const realizedPnlSol = input.positions.reduce((total, position) => total + realizedPositionPnl(position), 0);
   const estimatedOpenValueSol = input.positions.reduce((total, position) => total + position.estimatedOpenValueSol, 0);
+  const estimatedTotalPnlSol = input.positions.reduce((total, position) => total + position.estimatedPnlSol, 0);
   return {
     activeTopics: input.activeTopics,
     recentCandidates: input.launches.length,
@@ -17,8 +18,16 @@ export function calculateDashboardMetrics(input: {
     filledBuys: input.filledBuys,
     filledSells: input.filledSells,
     realizedPnlSol,
-    estimatedOpenValueSol
+    estimatedOpenValueSol,
+    estimatedTotalPnlSol
   };
+}
+
+function realizedPositionPnl(position: PositionListItem): number {
+  if (position.tokensBought <= 0) return position.solRealized - (position.status === "closed" ? position.solInvested : 0);
+  const soldFraction =
+    position.status === "closed" ? 1 : Math.min(1, Math.max(0, (position.tokensBought - position.tokensOpen) / position.tokensBought));
+  return position.solRealized - position.solInvested * soldFraction;
 }
 
 export function calculatePositionDerivedValues(input: {

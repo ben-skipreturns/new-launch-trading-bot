@@ -211,10 +211,11 @@ async function safeRead<T>(fallback: T, read: () => Promise<T>): Promise<DataSta
   try {
     return { ok: true, data: await read() };
   } catch (error) {
+    console.error("Dashboard data read failed", error);
     return {
       ok: false,
       data: fallback,
-      error: error instanceof Error ? error.message : String(error)
+      error: "Unable to read command-center data. Check the server logs and database connection."
     };
   }
 }
@@ -543,7 +544,9 @@ async function getTrendRadarHealth(): Promise<TrendRadarHealth> {
     webSearchCalls: latest?.web_search_calls ?? 0,
     latestEstimatedCostUsd: Number(latest?.estimated_cost_usd ?? 0),
     estimatedCostTodayUsd: Number(totals?.today_cost_usd ?? 0),
-    estimatedCostMonthUsd: Number(totals?.month_cost_usd ?? 0)
+    estimatedCostMonthUsd: Number(totals?.month_cost_usd ?? 0),
+    dailyBudgetUsd: numberEnv("OPENAI_TREND_DAILY_BUDGET_USD", 100),
+    monthlyBudgetUsd: numberEnv("OPENAI_TREND_MONTHLY_BUDGET_USD", 1000)
   };
 }
 
@@ -599,7 +602,8 @@ function emptyDashboard(): DashboardSummary {
       filledBuys: 0,
       filledSells: 0,
       realizedPnlSol: 0,
-      estimatedOpenValueSol: 0
+      estimatedOpenValueSol: 0,
+      estimatedTotalPnlSol: 0
     },
     recentCandidates: [],
     openPositions: [],
@@ -614,7 +618,9 @@ function emptyTrendRadarHealth(): TrendRadarHealth {
     webSearchCalls: 0,
     latestEstimatedCostUsd: 0,
     estimatedCostTodayUsd: 0,
-    estimatedCostMonthUsd: 0
+    estimatedCostMonthUsd: 0,
+    dailyBudgetUsd: numberEnv("OPENAI_TREND_DAILY_BUDGET_USD", 100),
+    monthlyBudgetUsd: numberEnv("OPENAI_TREND_MONTHLY_BUDGET_USD", 1000)
   };
 }
 
@@ -1293,6 +1299,13 @@ function stringArray(value: unknown): string[] {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function numberEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function numericValue(value: string | null): number | undefined {

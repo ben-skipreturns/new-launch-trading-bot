@@ -23,6 +23,8 @@ export interface TrendRadarHealth {
   latestEstimatedCostUsd: number;
   estimatedCostTodayUsd: number;
   estimatedCostMonthUsd: number;
+  dailyBudgetUsd: number;
+  monthlyBudgetUsd: number;
 }
 
 export type RadarReviewTier = "active" | "watch" | "rejected";
@@ -80,6 +82,7 @@ export interface DashboardMetrics {
   filledSells: number;
   realizedPnlSol: number;
   estimatedOpenValueSol: number;
+  estimatedTotalPnlSol: number;
 }
 
 export interface LaunchListItem {

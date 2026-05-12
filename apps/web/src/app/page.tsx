@@ -30,9 +30,9 @@ export default async function DashboardPage() {
       <ErrorPanel message={summary.ok ? undefined : summary.error} />
 
       <section className="grid grid-cols-3 gap-3 max-[1100px]:grid-cols-1">
-        <HealthItem label="Raw events" value={data.health.latestRawEventAt} />
-        <HealthItem label="Scores" value={data.health.latestScoreAt} />
-        <HealthItem label="Trend observations" value={data.health.latestTrendObservationAt} />
+        <HealthItem label="Raw events" value={data.health.latestRawEventAt} staleAfterMs={5 * 60 * 1000} />
+        <HealthItem label="Scores" value={data.health.latestScoreAt} staleAfterMs={5 * 60 * 1000} />
+        <HealthItem label="Trend observations" value={data.health.latestTrendObservationAt} staleAfterMs={60 * 60 * 1000} />
       </section>
 
       <TrendRadarPanel radar={data.trendRadar} />
@@ -44,6 +44,7 @@ export default async function DashboardPage() {
         <MetricCard title="Filled orders" value={`${data.metrics.filledBuys}/${data.metrics.filledSells}`} detail="buy / sell fills" />
         <MetricCard title="Realized PnL" value={formatSol(data.metrics.realizedPnlSol)} detail="Closed and partial exits" tone={data.metrics.realizedPnlSol >= 0 ? "good" : "bad"} />
         <MetricCard title="Open value" value={formatSol(data.metrics.estimatedOpenValueSol)} detail="Mark based on latest score price" tone="watch" />
+        <MetricCard title="Est. total PnL" value={formatSol(data.metrics.estimatedTotalPnlSol)} detail="Realized plus open mark" tone={data.metrics.estimatedTotalPnlSol >= 0 ? "good" : "bad"} />
       </section>
 
       <section className="grid grid-cols-[minmax(0,1.35fr)_minmax(360px,0.65fr)] gap-4 max-[1180px]:grid-cols-1">
@@ -214,21 +215,22 @@ function TrendRadarPanel({ radar }: { radar: TrendRadarHealth }) {
         <RadarStat label="Topics found" value={String(radar.topicsFound)} detail="latest refresh" />
         <RadarStat label="Web searches" value={String(radar.webSearchCalls)} detail="latest refresh" />
         <RadarStat label="Latest cost" value={formatUsd(radar.latestEstimatedCostUsd)} detail="estimated OpenAI spend" />
-        <RadarStat label="Today cost" value={formatUsd(radar.estimatedCostTodayUsd)} detail="estimated OpenAI spend" />
-        <RadarStat label="MTD cost" value={formatUsd(radar.estimatedCostMonthUsd)} detail="$100 monthly cap" />
+        <RadarStat label="Today cost" value={formatUsd(radar.estimatedCostTodayUsd)} detail={`${formatUsd(radar.dailyBudgetUsd)} daily cap`} />
+        <RadarStat label="MTD cost" value={formatUsd(radar.estimatedCostMonthUsd)} detail={`${formatUsd(radar.monthlyBudgetUsd)} monthly cap`} />
       </div>
     </section>
   );
 }
 
-function HealthItem({ label, value }: { label: string; value?: Date }) {
+function HealthItem({ label, value, staleAfterMs }: { label: string; value?: Date; staleAfterMs: number }) {
+  const stale = Boolean(value && Date.now() - value.getTime() > staleAfterMs);
   return (
     <div className="panel flex items-center justify-between gap-4 rounded-md p-4">
       <div>
         <div className="text-sm font-semibold">{label}</div>
         <div className="mt-1 text-sm text-muted">{formatDate(value)}</div>
       </div>
-      <StatusBadge label={value ? formatAge(value) : "missing"} tone={value ? "open" : "neutral"} />
+      <StatusBadge label={value ? (stale ? `${formatAge(value)} stale` : formatAge(value)) : "missing"} tone={stale ? "reject" : value ? "open" : "neutral"} />
     </div>
   );
 }

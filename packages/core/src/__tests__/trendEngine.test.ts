@@ -172,6 +172,24 @@ describe("MemeTrendEngine", () => {
 
     expect(candidates).toEqual([]);
   });
+
+  it("can fail closed when every trend source errors", async () => {
+    const store = new MemoryStore();
+    const engine = new MemeTrendEngine(
+      store,
+      [
+        {
+          name: "broken-source",
+          async fetchObservations() {
+            throw new Error("source unavailable");
+          }
+        }
+      ],
+      { failOnAllSourcesError: true }
+    );
+
+    await expect(engine.refresh()).rejects.toThrow(/All trend sources failed/);
+  });
 });
 
 function observation(source: string, phrase: string, traffic: number): TrendObservation {

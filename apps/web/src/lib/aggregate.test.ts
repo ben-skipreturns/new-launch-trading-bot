@@ -13,8 +13,17 @@ describe("command-center aggregate helpers", () => {
         launch({ mint: "b", expectedValueScore: 0.4 })
       ],
       positions: [
-        position({ mint: "a", status: "open", solInvested: 0.05, solRealized: 0.1, estimatedOpenValueSol: 0.2 }),
-        position({ mint: "b", status: "closed", solInvested: 0.05, solRealized: 0.01, estimatedOpenValueSol: 0 })
+        position({
+          mint: "a",
+          status: "open",
+          solInvested: 0.05,
+          solRealized: 0.1,
+          tokensBought: 1_000,
+          tokensOpen: 500,
+          estimatedOpenValueSol: 0.2,
+          estimatedPnlSol: 0.25
+        }),
+        position({ mint: "b", status: "closed", solInvested: 0.05, solRealized: 0.01, tokensOpen: 0, estimatedOpenValueSol: 0, estimatedPnlSol: -0.04 })
       ]
     });
 
@@ -25,9 +34,10 @@ describe("command-center aggregate helpers", () => {
       closedPositions: 1,
       filledBuys: 4,
       filledSells: 3,
-      estimatedOpenValueSol: 0.2
+      estimatedOpenValueSol: 0.2,
+      estimatedTotalPnlSol: 0.21
     });
-    expect(metrics.realizedPnlSol).toBeCloseTo(0.01);
+    expect(metrics.realizedPnlSol).toBeCloseTo(0.035);
   });
 
   it("derives moonbag exposure and estimated PnL from position balances", () => {
